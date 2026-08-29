@@ -1,0 +1,111 @@
+# L2 决策策略（可配置、可测、非 LLM 排序）
+# 决策输出是「选项 + 风险 + 验证实验」，不是答案；用户基于自己的底线拍板（D7）。
+
+# 决策类型 → 选项生成与排序策略
+decision_types:
+  # 怎么扭亏：从亏损出发，找互斥可执行的杠杆选项
+  turnaround:
+    option_cap: 4
+    # 每个可能选项：改哪个字段 + 标签
+    lever_candidates:
+      - field: price_per_unit
+        label: "提价（考验需求弹性）"
+      - field: daily_traffic
+        label: "提升客流（验证获客）"
+      - field: avg_salary
+        label: "优化人力成本"
+      - field: employee_count
+        label: "精简团队"
+      - field: variable_cost_ratio
+        label: "降低变动成本率"
+      - field: monthly_rent
+        label: "重新谈租金/迁址"
+      - field: other_fixed
+        label: "削减其他固定支出"
+  # 先验证什么：找「不确定性最大 × 影响最大」的假设
+  validate_first:
+    option_cap: 3
+    candidate_assumptions:
+      - field: daily_traffic
+        label: "客流（最直接影响营收）"
+      - field: price_per_unit
+        label: "客单价（需求弹性）"
+      - field: variable_cost_ratio
+        label: "变动成本率"
+      - field: avg_salary
+        label: "人工成本"
+  # 开不开 / 继续还是关：基于盈亏平衡与跑道
+  go_no_go:
+    option_cap: 3
+    lever_candidates: []
+  continue_stop:
+    option_cap: 3
+    lever_candidates: []
+  # 现金能撑多久
+  runway:
+    option_cap: 3
+    lever_candidates:
+      - field: monthly_rent
+        label: "压低固定成本（延长跑道）"
+      - field: employee_count
+        label: "精简人力（延长跑道）"
+      - field: price_per_unit
+        label: "提价（改善现金流）"
+  # 多方案选择
+  choose:
+    option_cap: 4
+    lever_candidates: []
+
+# 选项排序权重：得分 = 杠杆强度分 × 影响系数 × 可逆性系数 / (1+验证成本)
+ranking:
+  # 字段 → 推动盈亏平衡的杠杆强度（0~1），代码据此给每个 op 打分
+  lever_weights:
+    price_per_unit: 0.9
+    daily_traffic: 0.8
+    employee_count: 0.7
+    avg_salary: 0.7
+    variable_cost_ratio: 0.6
+    monthly_rent: 0.5
+    other_fixed: 0.4
+  # 可逆性：改完难回退的系数低
+  reversibility:
+    price_per_unit: 1.0      # 可随时改回
+    daily_traffic: 1.0
+    avg_salary: 0.8
+    employee_count: 0.6      # 招人/裁员难回退
+    variable_cost_ratio: 0.9
+    monthly_rent: 0.4        # 租约难改
+    other_fixed: 0.9
+  # 验证成本（0~1，越低越优先试）：改这个参数验证假设的成本
+  validation_cost:
+    price_per_unit: 0.2      # 限时提价试最便宜
+    daily_traffic: 0.5
+    employee_count: 0.8
+    avg_salary: 0.7
+    variable_cost_ratio: 0.3
+    monthly_rent: 1.0
+    other_fixed: 0.6
+
+# 否决条件（G6）：缺关键事实 → 「还不能定」+ 该补什么
+veto:
+  # 决策需要的关键字段；其 basis 为 missing 且无已采纳假设时否决确定性结论
+  required_user_fields:
+    turnaround: ["variable_cost_ratio"]
+    go_no_go: ["variable_cost_ratio"]
+    continue_stop: ["variable_cost_ratio"]
+    runway: ["variable_cost_ratio"]
+    validate_first: []
+    choose: ["variable_cost_ratio"]
+  # 跑道决策额外需要可用现金
+  required_cash_fields:
+    - total_investment
+
+# 决策输出规范（D5/D6）：LLM 禁止倾向词，规则层只产出客观结构
+output:
+  forbidden_tone_words:
+    - "建议你"
+    - "你应该"
+    - "必须"
+    - "千万不要"
+    - "最好"
+    - "推荐你"

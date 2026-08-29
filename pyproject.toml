@@ -1,0 +1,76 @@
+[project]
+name = "vibe-coding"
+version = "0.1.0"
+description = "创业者财务分析工作台 — 本地独立工作台 (A)"
+requires-python = ">=3.12"
+# ── 本地工作台 (A) 必需依赖 ──
+# 仅包含 web_server + 引擎层(router/session_state/workflow_engine/
+# financial_calculator/formatter/llm_advisor) 实际需要的包。
+# 这些是「一键 uv sync 即可本地运行 (A)」的最小集合。
+dependencies = [
+    "langchain==1.0.3",
+    "langchain-openai==1.0.1",
+    "langgraph==1.0.2",                 # A 链路间接依赖（llm_advisor / workflow_engine 经 langchain 拉入）
+    "langgraph-sdk==0.2.9",
+    "langsmith==0.4.39",
+    "fastapi>=0.121,<1",
+    "uvicorn>=0.38,<1",
+    "pydantic>=2.12,<3",
+    "Jinja2>=3.1,<4",
+    "python-dotenv>=1.2,<2",
+    "openpyxl>=3.1,<4",
+    "rich>=14,<15",
+]
+
+# ── Coze 平台服务 (B) 依赖（可选 extra）──
+# 本地不交付、由平台运行时保障，本地不装也能跑 (A)。
+# 部署到平台时：`uv sync --extra coze-platform`
+[project.optional-dependencies]
+coze-platform = [
+    "langgraph-checkpoint==3.0.0",
+    "langgraph-prebuilt==1.0.2",
+    "coze-coding-utils>=0.2.8,<1",
+    "coze-workload-identity>=0.1.4,<1",
+    "opencv-python>=4.12,<5",
+    "pandas>=2.2,<3",
+    "Pillow>=10.3,<11",
+    "cozeloop>=0.1.25,<1",
+    "alembic>=1.16,<2",
+    "SQLAlchemy>=2.0,<3",
+    "psycopg2-binary>=2.9,<3",
+    "boto3>=1.40,<2",
+    "langgraph-checkpoint-postgres>=3.0,<4",
+    "psycopg[binary]>=3.3,<4",
+    "psycopg-pool>=3.3,<4",
+    "pypdf>=6.4,<7",
+    "docx2python>=3.5,<4",
+    "python-pptx>=1.0,<2",
+    "coze-coding-dev-sdk>0.5.0,<1",
+    "PyGObject==3.48.2",
+    "dbus-python==1.3.2",
+    "pycairo==1.29.0",
+    "chardet>=5.2,<6",
+]
+
+[tool.uv]
+# 使用阿里云镜像作为默认源，替代 pypi.org
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+
+# pypi 仅供 [tool.uv.sources] 显式引用：阿里云镜像同步 PyPI 新版有延迟（小时级），
+# 当某个内部包的预发布版（如 a/b/rc 后缀）刚 push 到官方 PyPI 还未同步到镜像时，
+# 临时让该包从 PyPI 取，避免 lock/install 失败。explicit=true 保证不影响其他包的解析。
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple/"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio>=0.23,<1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

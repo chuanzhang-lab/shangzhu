@@ -1,0 +1,79 @@
+node_modules
+dist
+.DS_Store
+*.swp
+.git/*
+__pycache__/
+*.pyc
+.venv
+*.o
+*.a
+/vendor
+*.egg-info/
+/.env
+.env
+.cozeproj/reduction
+
+# 视频文件
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.mkv
+*.webm
+*.m4v
+*.mpeg
+*.mpg
+*.3gp
+*.f4v
+*.rmvb
+*.vob
+
+# 归档文件
+*.iso
+*.dmg
+*.rar
+*.zip
+*.gz
+
+# 文档类也默认加入
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.ppt
+*.pptx
+*.xlsx
+*.csv
+
+# Preview files
+.preview
+
+# CodeGraph index
+.codegraph
+
+# 测试/运行产物
+.pytest_cache/
+.coverage
+web_server.log
+*.log
+logs/
+reports/
+
+# 含 API Key 的配置文件
+config/agent_llm_config.json
+
+# 外部工具元数据
+.workbuddy/
+.hermes/
+.codegraph/
+
+# 测试产物
+.pytest_cache/
+.coverage
+web_server.log
+*.log
+logs/
+reports/

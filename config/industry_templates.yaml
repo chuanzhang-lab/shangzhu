@@ -1,0 +1,336 @@
+industry_templates:
+  餐饮:
+    hypotheses:
+      variable_cost_ratio: 0.4
+      employee_count: 3
+      avg_salary: 7000
+      equipment_ratio: 0.6
+      labor_burden: 0.4
+      cost_structure:
+        rent: 0.3
+        packaging: 0.08
+        marketing: 0.12
+        labor: 0.4
+        other: 0.1
+    benchmark:
+      daily_traffic_range: 80-250 杯
+      typical_profit_margin: 15-25%
+      avg_breakeven_months: 6-12 个月
+      key_warning: 新店前 3 个月客流通常只有目标值的 40-50%
+      profit_margin_min: 0.15
+      profit_margin_max: 0.25
+      breakeven_months_min: 6
+      breakeven_months_max: 12
+      traffic_min: 80
+      traffic_max: 250
+  零售:
+    hypotheses:
+      variable_cost_ratio: 0.55
+      employee_count: 2
+      avg_salary: 4500
+      equipment_ratio: 0.5
+      labor_burden: 0.35
+      cost_structure:
+        rent: 0.25
+        packaging: 0.05
+        marketing: 0.2
+        labor: 0.35
+        other: 0.15
+    benchmark:
+      daily_traffic_range: 50-150 人
+      typical_profit_margin: 10-18%
+      avg_breakeven_months: 8-18 个月
+      key_warning: 库存周转率是核心指标，建议控制在 30 天以内
+      profit_margin_min: 0.1
+      profit_margin_max: 0.18
+      breakeven_months_min: 8
+      breakeven_months_max: 18
+      traffic_min: 50
+      traffic_max: 150
+  SaaS:
+    hypotheses:
+      variable_cost_ratio: 0.25
+      employee_count: 3
+      avg_salary: 15000
+      equipment_ratio: 0.1
+      labor_burden: 0.3
+      cost_structure:
+        rent: 0.05
+        packaging: 0.0
+        marketing: 0.35
+        labor: 0.5
+        other: 0.1
+    benchmark:
+      daily_traffic_range: 不适用（按 MRR 衡量）
+      typical_profit_margin: 目标 20-30%（初期亏损正常）
+      avg_breakeven_months: 18-36 个月
+      key_warning: LTV/CAC 应 > 3，月 churn < 5%
+      profit_margin_min: 0.2
+      profit_margin_max: 0.3
+      breakeven_months_min: 18
+      breakeven_months_max: 36
+      traffic_min: null
+      traffic_max: null
+  教育:
+    hypotheses:
+      variable_cost_ratio: 0.3
+      employee_count: 3
+      avg_salary: 8000
+      equipment_ratio: 0.3
+      labor_burden: 0.35
+      cost_structure:
+        rent: 0.2
+        packaging: 0.03
+        marketing: 0.22
+        labor: 0.45
+        other: 0.1
+    benchmark:
+      daily_traffic_range: 按班容量×课次
+      typical_profit_margin: 20-35%
+      avg_breakeven_months: 6-15 个月
+      key_warning: 需办学许可证，合规成本高
+      profit_margin_min: 0.2
+      profit_margin_max: 0.35
+      breakeven_months_min: 6
+      breakeven_months_max: 15
+      traffic_min: null
+      traffic_max: null
+  电商:
+    hypotheses:
+      variable_cost_ratio: 0.6
+      employee_count: 2
+      avg_salary: 7000
+      equipment_ratio: 0.1
+      labor_burden: 0.35
+      cost_structure:
+        rent: 0.05
+        packaging: 0.15
+        marketing: 0.3
+        labor: 0.25
+        other: 0.25
+    benchmark:
+      daily_traffic_range: 按 GMV/订单量
+      typical_profit_margin: 5-15%
+      avg_breakeven_months: 3-12 个月
+      key_warning: 流量成本持续上涨，需控制 CAC 在客单价 20% 以内
+      profit_margin_min: 0.05
+      profit_margin_max: 0.15
+      breakeven_months_min: 3
+      breakeven_months_max: 12
+      traffic_min: null
+      traffic_max: null
+  制造:
+    hypotheses:
+      variable_cost_ratio: 0.65
+      employee_count: 5
+      avg_salary: 6000
+      equipment_ratio: 0.5
+      labor_burden: 0.45
+      cost_structure:
+        rent: 0.1
+        packaging: 0.05
+        marketing: 0.15
+        labor: 0.5
+        other: 0.2
+    benchmark:
+      daily_traffic_range: 不适用
+      typical_profit_margin: 8-15%
+      avg_breakeven_months: 12-24 个月
+      key_warning: 良品率 < 95% 则项目不可行
+      profit_margin_min: 0.08
+      profit_margin_max: 0.15
+      breakeven_months_min: 12
+      breakeven_months_max: 24
+      traffic_min: null
+      traffic_max: null
+  宠物:
+    hypotheses:
+      variable_cost_ratio: 0.35
+      employee_count: 2
+      avg_salary: 5000
+      equipment_ratio: 0.4
+      labor_burden: 0.4
+      cost_structure:
+        rent: 0.25
+        packaging: 0.06
+        marketing: 0.14
+        labor: 0.4
+        other: 0.15
+    benchmark:
+      daily_traffic_range: 10-30 只宠物/天
+      typical_profit_margin: 20-30%
+      avg_breakeven_months: 8-15 个月
+      key_warning: 宠物安全事故可能导致一次性大额赔付
+      profit_margin_min: 0.2
+      profit_margin_max: 0.3
+      breakeven_months_min: 8
+      breakeven_months_max: 15
+      traffic_min: 10
+      traffic_max: 30
+  医疗:
+    hypotheses:
+      variable_cost_ratio: 0.25
+      employee_count: 5
+      avg_salary: 10000
+      equipment_ratio: 0.55
+      labor_burden: 0.45
+      cost_structure:
+        rent: 0.15
+        packaging: 0.04
+        marketing: 0.15
+        labor: 0.55
+        other: 0.11
+    benchmark:
+      daily_traffic_range: 20-80 人次
+      typical_profit_margin: 15-30%
+      avg_breakeven_months: 12-24 个月
+      key_warning: 许可证门槛极高，合规成本占总成本 10-15%
+      profit_margin_min: 0.15
+      profit_margin_max: 0.3
+      breakeven_months_min: 12
+      breakeven_months_max: 24
+      traffic_min: 20
+      traffic_max: 80
+  金融:
+    hypotheses:
+      variable_cost_ratio: 0.15
+      employee_count: 5
+      avg_salary: 20000
+      equipment_ratio: 0.05
+      labor_burden: 0.5
+      cost_structure:
+        rent: 0.05
+        packaging: 0.0
+        marketing: 0.2
+        labor: 0.65
+        other: 0.1
+    benchmark:
+      daily_traffic_range: 不适用
+      typical_profit_margin: 25-40%
+      avg_breakeven_months: 12-24 个月
+      key_warning: 监管合规是第一生命线，合规成本极高
+      profit_margin_min: 0.25
+      profit_margin_max: 0.4
+      breakeven_months_min: 12
+      breakeven_months_max: 24
+      traffic_min: null
+      traffic_max: null
+  内容:
+    hypotheses:
+      variable_cost_ratio: 0.2
+      employee_count: 2
+      avg_salary: 8000
+      equipment_ratio: 0.1
+      labor_burden: 0.3
+      cost_structure:
+        rent: 0.05
+        packaging: 0.0
+        marketing: 0.4
+        labor: 0.45
+        other: 0.1
+    benchmark:
+      daily_traffic_range: 按粉丝量/播放量
+      typical_profit_margin: 20-40%（高度波动）
+      avg_breakeven_months: 6-18 个月
+      key_warning: 平台算法依赖风险极高，建议多平台分发
+      profit_margin_min: 0.2
+      profit_margin_max: 0.4
+      breakeven_months_min: 6
+      breakeven_months_max: 18
+      traffic_min: null
+      traffic_max: null
+  房地产:
+    hypotheses:
+      variable_cost_ratio: 0.3
+      employee_count: 3
+      avg_salary: 8000
+      equipment_ratio: 0.2
+      labor_burden: 0.4
+      cost_structure:
+        rent: 0.1
+        packaging: 0.0
+        marketing: 0.3
+        labor: 0.45
+        other: 0.15
+    benchmark:
+      daily_traffic_range: 不适用
+      typical_profit_margin: 15-25%
+      avg_breakeven_months: 12-36 个月
+      key_warning: 资金杠杆风险，利率波动直接影响利润
+      profit_margin_min: 0.15
+      profit_margin_max: 0.25
+      breakeven_months_min: 12
+      breakeven_months_max: 36
+      traffic_min: null
+      traffic_max: null
+  企业服务:
+    hypotheses:
+      variable_cost_ratio: 0.3
+      employee_count: 3
+      avg_salary: 12000
+      equipment_ratio: 0.1
+      labor_burden: 0.4
+      cost_structure:
+        rent: 0.08
+        packaging: 0.0
+        marketing: 0.3
+        labor: 0.52
+        other: 0.1
+    benchmark:
+      daily_traffic_range: 不适用（按合同额）
+      typical_profit_margin: 15-25%
+      avg_breakeven_months: 12-24 个月
+      key_warning: 客户集中度风险：单一客户 > 30% 收入即为高风险
+      profit_margin_min: 0.15
+      profit_margin_max: 0.25
+      breakeven_months_min: 12
+      breakeven_months_max: 24
+      traffic_min: null
+      traffic_max: null
+fallback_template:
+  hypotheses:
+    variable_cost_ratio: 0.4
+    employee_count: 2
+    avg_salary: 6000
+    equipment_ratio: 0.4
+    labor_burden: 0.4
+    cost_structure:
+      rent: 0.2
+      packaging: 0.05
+      marketing: 0.2
+      labor: 0.4
+      other: 0.15
+  benchmark:
+    daily_traffic_range: 未知
+    typical_profit_margin: 无数据
+    avg_breakeven_months: 无数据
+    key_warning: 建议提供更多项目细节以获得更准确分析
+    profit_margin_min: null
+    profit_margin_max: null
+    breakeven_months_min: null
+    breakeven_months_max: null
+    traffic_min: null
+    traffic_max: null
+industry_aliases:
+  saas: SaaS
+  SAAS: SaaS
+  app: SaaS
+  software: SaaS
+  cafe: 餐饮
+  coffee: 餐饮
+  restaurant: 餐饮
+  clinic: 医疗
+  hospital: 医疗
+  shop: 零售
+  store: 零售
+  factory: 制造
+  media: 内容
+  estate: 房地产
+  realty: 房地产
+hypothesis_fields:
+- variable_cost_ratio
+- employee_count
+- avg_salary
+- equipment_ratio
+- labor_burden
+- cost_structure

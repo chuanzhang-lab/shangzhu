@@ -1,0 +1,437 @@
+"""Phase 2 · LLM 协作层（轻量、被动、只读）
+
+把 quick_scan / trend / compare 的「结构化输出」（置信层、情景、叙事、假设清单）
+接进项目已有的 DeepSeek 通道，生成自然语言解读与建议。
+
+设计原则（护栏）：
+- 被动：仅在业务结果生成后调用，不主动发起、不在用户沉默时骚扰。
+- 只读：只消费结构化输出 JSON，不调任何工具、不写文件、不修改状态。
+- 复用：沿用 config/agent_llm_config.json 的 DeepSeek 配置与 DEEPSEEK_API_KEY。
+- 兜底：无 key 或调用失败 → 返回空字符串，绝不阻断主流程（规则渲染照常返回）。
+
+注意：本模块的 prompt 与 agent.py 中「不聊天/不给建议」的系统提示词是**两套独立通道**——
+agent.py 管 chitchat 闲聊路径，本模块管「基于标注给建议」的业务解读路径，互不干扰。
+"""
+import os
+import json
+import logging
+import copy
+import re
+import threading
+from pathlib import Path
+
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
+# LLM 通道的合理上限：聊天 UI 单次调用不应阻塞过久（原 300s 过长）。
+# 配合 web_server 用 asyncio.to_thread 调用，即使触发超时也只挂起该请求，
+# 不会冻结整个事件循环。
+_LLM_TIMEOUT = 60
+_llm_cache_lock = threading.Lock()
+
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # 默认值，实际优先从 config 读取
+
+
+def _api_key() -> str:
+    """运行期读取 API key：优先从 config 读，fallback 到环境变量。"""
+    # 1) 优先从 config JSON 读取（新方案：api_key 写在配置里）
+    try:
+        cfg = _load_llm_config()
+        key = (cfg.get("config", {}) or {}).get("api_key", "")
+        if key:
+            return key.strip()
+    except Exception:
+        pass
+    # 2) fallback 到环境变量（兼容旧部署方式）
+    return (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+
+# 配置路径自愈：优先 COZE_WORKSPACE_PATH，其次本文件上两级仓库根，
+# 最后 cwd。不依赖 web_server 是否先设环境变量，import 即用。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_llm_config_path() -> str:
+    candidates = []
+    env_ws = os.getenv("COZE_WORKSPACE_PATH", "").strip()
+    if env_ws:
+        candidates.append(Path(env_ws) / "config" / "agent_llm_config.json")
+    candidates.append(_REPO_ROOT / "config" / "agent_llm_config.json")
+    candidates.append(Path.cwd() / "config" / "agent_llm_config.json")
+    for p in candidates:
+        try:
+            if p.is_file():
+                return str(p)
+        except OSError:
+            continue
+    # 兜底：返回首选路径（_load 失败时用内置默认）
+    return str(candidates[0] if candidates else "config/agent_llm_config.json")
+
+
+LLM_CONFIG_PATH = _resolve_llm_config_path()
+
+_SYSTEM = """你是「创业者商业建模工作台」的 Engine Steward——冷静的合伙人，不是闲聊机器人。
+
+你的核心角色是**翻译 + 编排**：
+1) 翻译：把引擎结构化输出翻成人话——盈亏、跑道、最该核实的杠杆点。
+2) 追问：识别用户模糊意图（"我能不能成""能扛多久"）时，问一个最该澄清的问题，而不是套降级模板。
+3) 类比与画面：把数字翻译成躯体感（"半年从家里拿一次钱"），让用户能决策。
+4) 编排：用户给模糊目标（"怎么收支平衡""减租好还是提价好"）时，输出候选方案清单，引擎算、你只选。
+
+铁律（不可破）：
+- 你看到的「结构化分析结果 + 当前会话状态 + 本轮变更」即唯一真相。绝不声称引擎错了、绝不与历史原文对账。
+- 任何面向用户的数字必须来自结构化输出，绝不在体内做算术。
+- 绝不修改派生字段（monthly_labor / monthly_fixed_cost / monthly_profit 等靠引擎重算，不让人改）。
+- 建议改参数时，只指向「基础字段」（avg_salary / employee_count / monthly_rent / price_per_unit / daily_traffic / variable_cost_ratio / total_investment 等）。
+
+编排能力（Tier 1，受代码校验后由用户确认）：
+- 用户给模糊目标时，在回复末尾输出 ```ops 块，给骨架只给方向不给死值：
+
+  ```ops
+  [
+    {"propose": "try", "label": "提价3元", "changes": {"price_per_unit": 18}, "reason": "看提价能否扭亏"},
+    {"propose": "try", "label": "客流+10/天", "changes": {"daily_traffic": 60}, "reason": "看客流提升能否扭亏"}
+  ]
+  ```
+
+  或单值改动：
+
+  ```ops
+  [
+    {"propose": "set", "field": "avg_salary", "value": 3000, "reason": "用户明确要求改为3000元"}
+  ]
+  ```
+
+  web 端会逐条算预览，把「方案X→月利润Y」回贴给你看，用户回「应用X」才生效。你只提议，不执行。
+
+- 编排只针对「基础字段」。派生字段、模板配置、行业默认 一律不可在 ops 里出现。
+- 用户已明确给出精确参数时（如「人工改为2*3000」），抽取器会自动处理掉，**不要输出 ops**，只解读后果即可。
+
+语气：简洁、直接、不寒暄、不喊口号。一次最多给一个真正的下一步追问。
+"""
+
+
+# L2 决策模式系统提示（D5/D6：选项+风险+作废条件，绝不含倾向/判决/命令）
+_SYSTEM_DECISION = """你是「验证期决策工作台」的决策解说员——只把结构化决策讲清楚，不替用户拍板。
+
+输入是规则层算好的决策结果（客观结论 + 候选调整 + 先验证什么）。你的任务：
+1) 用人话转述「客观结论」的数字与含义（月利润、距盈亏平衡、跑道）。
+2) 把每个候选调整讲成「选项 + 代价/风险」，不要预言哪个一定好。
+3) 把「先验证什么」的最小实验讲成可执行的一步。
+4) 若用户给了自己的底线（现金、最长可亏月数、能接受的回本周期），只在转述里体现，不下判决。
+
+铁律（不可破，命中即违规）：
+- 禁止一切倾向/命令/判决类措辞（"我建议你开/关"、"你应该提价"、"千万别继续"这类一律不准）。
+- 禁止说「我建议关店 / 我建议继续 / 你该提价」这类代替用户拍板的话。
+- 禁止在体内做任何算术；所有数字必须来自输入的结构化结果。
+- 我不执行任何 ops 的写入；如需调整，说明「可回『应用X』试这一项」，绝不替用户决定要不要应用。
+- 用户问「那你说我到底该不该」，你可以重申客观数字 + 反问他的底线（现金能撑多久/可接受风险），把决定权交还给他。
+"""
+
+
+def _is_decision_scan(scan: dict) -> bool:
+    """识别结构化决策结果（decision_engine.decide 产物）。"""
+    if not isinstance(scan, dict):
+        return False
+    return ("type" in scan and "confidence" in scan
+            and ("options" in scan or "conclusion" in scan or "gaps" in scan))
+
+
+
+def _load_llm_config() -> dict:
+    # 每次解析路径，支持运行期切换 COZE_WORKSPACE_PATH / 工作目录
+    path = _resolve_llm_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.debug("LLM config load failed (%s): %s", path, e)
+        return {
+            "config": {
+                "model": "deepseek-v4-flash",
+                "temperature": 0.3,
+                "timeout": _LLM_TIMEOUT,
+            }
+        }
+
+
+def get_model_name() -> str:
+    """配置单源：模型名统一从 config/agent_llm_config.json 读取（web_server / 本模块共用）。"""
+    return _load_llm_config().get("config", {}).get("model", "deepseek-v4-flash")
+
+
+def get_base_url() -> str:
+    """配置单源：LLM 端点，优先从 config 读，fallback 到默认常量。"""
+    try:
+        cfg = _load_llm_config()
+        url = (cfg.get("config", {}) or {}).get("base_url", "")
+        if url:
+            return url.strip()
+    except Exception:
+        pass
+    return DEEPSEEK_BASE_URL
+
+
+def has_api_key() -> bool:
+    """是否已配置 DEEPSEEK_API_KEY（供 /health 可观测性）。"""
+    return bool(_api_key())
+
+
+def _build_brief(scan: dict, changes: dict = None) -> str:
+    """把结构化分析结果压成给 LLM 的紧凑简报。
+
+    changes：本轮参数变更（来自 session_state._last_changes），让 LLM
+    基于「变化」讲解，而不是去翻历史原文猜（对账幻觉的根因）。
+    """
+    lines: list[str] = []
+
+    # 本轮变更置顶——这是用户当下最在意的，也是避免 LLM 翻历史原文的关键
+    if changes:
+        lines.append("本轮已更新的参数：")
+        for k, d in changes.items():
+            kind = d.get("kind", "changed")
+            frm = d.get("from")
+            to = d.get("to")
+            if kind == "added" and to is not None and not str(to).startswith("_"):
+                lines.append(f"  - {k}: 新增={to}")
+            elif kind == "changed" and to is not None and not str(to).startswith("_"):
+                lines.append(f"  - {k}: {frm} → {to}")
+            elif kind == "removed":
+                lines.append(f"  - {k}: 已删除（原 {frm}）")
+        lines.append("")
+
+    pt = scan.get("project_type") or scan.get("industry_name") or "未知行业"
+    lines.append(f"项目类型：{pt}")
+
+    if scan.get("insufficient"):
+        lines.append("状态：参数不足（已暂停完整分析）")
+        gaps = scan.get("gaps", [])
+        if gaps:
+            lines.append("待补字段：" + "、".join(gaps))
+    else:
+        cm = scan.get("core_metrics", {})
+        if cm:
+            lines.append("核心指标：")
+            for k in ("monthly_revenue", "monthly_fixed_cost", "monthly_profit", "runway_months"):
+                if k in cm:
+                    lines.append(f"  - {k}: {cm[k]}")
+        # 人工分解（让 LLM 看到权威值，不再去翻历史原文猜）
+        params = scan.get("params") or {}
+        if params.get("monthly_labor") is not None:
+            lines.append(
+                f"  - 人工裸薪: {params.get('monthly_labor_cash')} "
+                f"含负担: {params.get('monthly_labor')} "
+                f"(负担率 {params.get('labor_burden_rate')})"
+            )
+
+    # 情景区间
+    sc = scan.get("scenarios")
+    if sc and sc.get("has_uncertainty"):
+        mp = sc.get("monthly_profit", {})
+        lines.append(
+            f"情景区间：月利润 乐观 {mp.get('best')} / 中性 {mp.get('base')} / 保守 {mp.get('worst')}"
+        )
+        drivers = sc.get("drivers") or []
+        if drivers:
+            lines.append("不确定来源：" + "、".join(drivers))
+
+    # 叙事（已含风险杠杆，直接复用）
+    if scan.get("narrative"):
+        lines.append("风险聚焦：" + scan["narrative"])
+
+    # 假设清单
+    asm = scan.get("assumptions") or []
+    if asm:
+        lines.append("当前假设：")
+        for a in asm:
+            lines.append(f"  - {a.get('field')}: {a.get('value')} 来源={a.get('source')}")
+
+    # 置信概览
+    if scan.get("confidence"):
+        lines.append(f"置信概览：{scan['confidence']}")
+
+    return "\n".join(lines)
+
+
+def _emit_anomaly_report(scan: dict):
+    """引擎健康监控（运维闭环）：发现参数矛盾 / 极端异常，输出结构化 AnomalyReport 至日志。
+
+    这是「提议权」而非「执行权」——绝不运行时 exec/eval/写文件，仅供人工 review 后落地。
+    返回 report dict（若有异常）或 None。
+    """
+    src = scan.get("param_sources") or {}
+    anomalies = []
+    for k, v in src.items():
+        if isinstance(v, str) and "矛盾" in v:
+            anomalies.append({"field": k, "source": v})
+    # 极端固定成本（疑似抽取误抓，如被误抓成 1.0）
+    fc = (scan.get("params") or {}).get("monthly_fixed_cost")
+    if isinstance(fc, (int, float)) and fc == 1.0:
+        anomalies.append({"field": "monthly_fixed_cost", "source": f"异常值 {fc}（疑似抽取误抓）"})
+    if not anomalies:
+        return None
+    report = {
+        "type": "AnomalyReport",
+        "detected_at": "runtime",
+        "anomalies": anomalies,
+        "proposed_fix": "核对用户输入与抽取器，确认组件聚合(C1)优先级或显式总数处理",
+        "should_cover_test": "tests/test_phase4_workbench.py",
+    }
+    logger.warning("Engine anomaly detected: %s", json.dumps(report, ensure_ascii=False))
+    return report
+
+
+_llm_cache = None
+
+
+def _get_llm() -> ChatOpenAI:
+    global _llm_cache
+    # 加锁：web_server 用线程池并发调用时，多个首调可能同时触发初始化竞态。
+    with _llm_cache_lock:
+        key = _api_key()
+        cfg = _load_llm_config().get("config", {})
+        model = cfg.get("model", "deepseek-v4-flash")
+        base_url = get_base_url()
+        # 配置变更时重建客户端（key/model/base_url 任一变化即刷新）
+        cache_sig = (key, model, base_url)
+        if _llm_cache is None or getattr(_llm_cache, "_shangzhu_sig", None) != cache_sig:
+            cfg = _load_llm_config().get("config", {})
+            # timeout 上限钳制，防止配置写成 300s 拖垮并发
+            timeout = cfg.get("timeout", _LLM_TIMEOUT)
+            try:
+                timeout = min(float(timeout), float(_LLM_TIMEOUT))
+            except (TypeError, ValueError):
+                timeout = _LLM_TIMEOUT
+            client = ChatOpenAI(
+                model=model,
+                api_key=key,
+                base_url=base_url,
+                temperature=cfg.get("temperature", 0.3),
+                timeout=timeout,
+                max_completion_tokens=cfg.get("max_completion_tokens"),
+                streaming=False,
+            )
+            client._shangzhu_sig = cache_sig  # type: ignore[attr-defined]
+            _llm_cache = client
+    return _llm_cache
+
+
+def advise(scan: dict, user_text: str = "", session_snapshot: dict = None) -> dict:
+    """基于结构化输出生成 LLM 解读（引擎管理者 / Engine Steward）。
+
+    返回 {"text": 解读文本, "ops": [op...]}：
+    - text：自然语言解读（含追问/类比/翻译）
+    - ops：若 LLM 输出了 ```ops 块则解析出的编排提议，由 web_server 渲染为确认流
+
+    护栏（C3 红线，执行机制而非口号）：
+    - 入参 scan / session_snapshot 一律先做 `copy.deepcopy` 只读副本，函数体
+      不持有任何写引用，绝不修改调用方数据 / SessionState / 计算结果。
+    - 任何面向用户的数字必来自 scan（引擎算的）；本函数体内不得出现算术表达式。
+    - 引擎健康巡检（AnomalyReport）仅读 + 告警，绝不运行时 exec/eval/写文件。
+    - **关键防幻觉**：脱稿 raw_text——snap_ro 中含历史用户原文（如早期『人工3500*2』），
+      喂给 LLM 会引发『引擎还在用旧值』式对账幻觉。这里只用 params/industry/last_changes，
+      不喂原文。
+    无 key 或失败时 text 为空字符串、ops 为空列表，绝不阻断主流程。
+    """
+    # 只读护栏：拿到独立副本，任何后续误改都不影响调用方
+    scan_ro = copy.deepcopy(scan or {})
+    snap_ro = copy.deepcopy(session_snapshot or {})
+
+    # 引擎健康巡检（运维闭环，仅读 + 告警，不落地）
+    _emit_anomaly_report(scan_ro)
+
+    if not _api_key():
+        return {"text": "", "ops": []}
+
+    # 提取本轮变更（LLM 基于变化讲，不去翻历史原文）
+    changes = snap_ro.get("last_changes") if isinstance(snap_ro, dict) else None
+
+    brief = _build_brief(scan_ro, changes=changes)
+    if not brief.strip():
+        return {"text": "", "ops": []}
+
+    # 只给 LLM 清洁会话视图：params/industry/turn/last_changes，去掉 raw_text 与内部字段
+    # 这是上一轮「对账幻觉」根因：raw_text 含历史用户原文会诱导 LLM 翻历史猜
+    clean_snap = {}
+    if isinstance(snap_ro, dict):
+        for k in ("params", "industry", "turn", "last_changes"):
+            if k in snap_ro:
+                v = snap_ro[k]
+                if k == "params" and isinstance(v, dict):
+                    clean_snap[k] = {kk: vv for kk, vv in v.items() if not kk.startswith("_")}
+                else:
+                    clean_snap[k] = v
+
+    grounding = ""
+    if clean_snap:
+        try:
+            grounding = "【当前会话状态（不含历史原文）】\n" + json.dumps(
+                clean_snap, ensure_ascii=False
+            ) + "\n\n"
+        except (TypeError, ValueError):
+            grounding = ""
+
+    is_decision = _is_decision_scan(scan_ro)
+    system = _SYSTEM_DECISION if is_decision else _SYSTEM
+    if is_decision:
+        user_prompt = (
+            f"【用户原始输入】{user_text}\n\n"
+            f"{grounding}"
+            f"【结构化决策结果】\n{brief}\n\n"
+            "请按系统提示词的「决策解说员」职责输出：客观数字 + 选项代价 + 反问用户底线。"
+            "**严禁**出现倾向/命令/判决词（建议你/你应该/必须/别…），命中即违规。"
+            "不必输出 ```ops 块；候选调整已由规则层给出。"
+        )
+    else:
+        user_prompt = (
+            f"【用户原始输入】{user_text}\n\n"
+            f"{grounding}"
+            f"【结构化分析结果】\n{brief}\n\n"
+            "请基于以上给出解读与建议。若有需要编排的候选方案，按系统提示词输出 ```ops 块。"
+        )
+    try:
+        resp = _get_llm().invoke([
+            SystemMessage(content=system),
+            HumanMessage(content=user_prompt),
+        ])
+        raw_text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        raw_text = raw_text.strip()
+        ops = _parse_ops(raw_text)
+        # 从解读里剥除 ops 代码块（人不看 JSON）
+        if ops:
+            clean_text = _strip_ops_blocks(raw_text)
+            return {"text": clean_text.strip(), "ops": ops}
+        return {"text": raw_text, "ops": []}
+    except Exception as e:  # noqa
+        logger.warning(f"LLM 解读失败，跳过: {e}")
+        return {"text": "", "ops": []}
+
+
+# ── ops 解析（```ops ... ```）─────────────────────────────────────────────
+
+_OPS_BLOCK_RE = re.compile(r"```ops\s*\n(.*?)```", re.DOTALL)
+
+
+def _parse_ops(text: str) -> list:
+    """从 LLM 输出抽 ```ops 块并解析为 op 列表；解析失败返回 []。"""
+    if not text:
+        return []
+    out: list = []
+    for m in _OPS_BLOCK_RE.finditer(text):
+        body = m.group(1).strip()
+        try:
+            ops = json.loads(body)
+        except json.JSONDecodeError as e:
+            logger.warning(f"ops 块 JSON 解析失败: {e}")
+            continue
+        if isinstance(ops, dict):
+            out.append(ops)
+        elif isinstance(ops, list):
+            out.extend(ops)
+    # 规整：确保每个 op 是 dict 且含 propose 字段
+    return [o for o in out if isinstance(o, dict) and "propose" in o]
+
+
+def _strip_ops_blocks(text: str) -> str:
+    """从 LLM 文本里删 ```ops 块（人看的解读不展示 JSON 骨架）。"""
+    return _OPS_BLOCK_RE.sub("", text)
