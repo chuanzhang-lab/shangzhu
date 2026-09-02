@@ -17,9 +17,11 @@ import json
 import logging
 import copy
 import re
+import tempfile
 import threading
 from pathlib import Path
 
+import requests
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
@@ -33,18 +35,68 @@ _llm_cache_lock = threading.Lock()
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # 默认值，实际优先从 config 读取
 
 
-def _api_key() -> str:
-    """运行期读取 API key：优先从 config 读，fallback 到环境变量。"""
-    # 1) 优先从 config JSON 读取（新方案：api_key 写在配置里）
+def _api_key_from_keyring(service: str, account: str) -> str:
+    """从 macOS Keyring 读取 API key，读不到返回空串。"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def _api_key_from_env() -> str:
+    """从环境变量读取 API key（兼容多厂商变量名）。"""
+    for var in ("DEEPSEEK_API_KEY", "LONGCAT_API_KEY", "LLM_API_KEY"):
+        v = os.getenv(var, "").strip()
+        if v:
+            return v
+    return ""
+
+
+def _api_key_from_config() -> str:
+    """从 config JSON 读取 API key（回退，会打 WARNING）。"""
     try:
         cfg = _load_llm_config()
-        key = (cfg.get("config", {}) or {}).get("api_key", "")
-        if key:
-            return key.strip()
+        return (cfg.get("config", {}) or {}).get("api_key", "").strip()
     except Exception:
-        pass
-    # 2) fallback 到环境变量（兼容旧部署方式）
-    return (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+        return ""
+
+
+def _api_key() -> str:
+    """运行期读取 API key，四级优先级。
+
+    1) 环境变量 (DEEPSEEK_API_KEY / LONGCAT_API_KEY / LLM_API_KEY)
+    2) macOS Keyring (service="shangzhu-llm", account="api_key")
+    3) config/agent_llm_config.json（回退，打 WARNING）
+    4) 空串（未配置）
+    """
+    # 1) env
+    key = _api_key_from_env()
+    if key:
+        return key
+
+    # 2) keyring
+    key = _api_key_from_keyring("shangzhu-llm", "api_key")
+    if key:
+        return key
+
+    # 3) config (回退)
+    key = _api_key_from_config()
+    if key:
+        logger.warning(
+            "api_key 以明文形式存储在 config/agent_llm_config.json，"
+            "建议迁移到 macOS Keyring（运行 `python scripts/migrate_key_to_keyring.py`）"
+            "或设置环境变量 DEEPSEEK_API_KEY / LONGCAT_API_KEY"
+        )
+        return key
+
+    return ""
 
 # 配置路径自愈：优先 COZE_WORKSPACE_PATH，其次本文件上两级仓库根，
 # 最后 cwd。不依赖 web_server 是否先设环境变量，import 即用。
@@ -354,11 +406,18 @@ def advise(scan: dict, user_text: str = "", session_snapshot: dict = None) -> di
     # 这是上一轮「对账幻觉」根因：raw_text 含历史用户原文会诱导 LLM 翻历史猜
     clean_snap = {}
     if isinstance(snap_ro, dict):
-        for k in ("params", "industry", "turn", "last_changes"):
+        for k in ("params", "grouped_params", "params_summary",
+                  "accepted_hypotheses", "industry", "turn", "last_changes"):
             if k in snap_ro:
                 v = snap_ro[k]
                 if k == "params" and isinstance(v, dict):
                     clean_snap[k] = {kk: vv for kk, vv in v.items() if not kk.startswith("_")}
+                elif k == "grouped_params" and isinstance(v, dict):
+                    # 分组视图：过滤掉下划线开头的内部键
+                    clean_snap[k] = {
+                        g: {kk: vv for kk, vv in gv.items() if not kk.startswith("_")}
+                        for g, gv in v.items()
+                    }
                 else:
                     clean_snap[k] = v
 
@@ -435,3 +494,137 @@ def _parse_ops(text: str) -> list:
 def _strip_ops_blocks(text: str) -> str:
     """从 LLM 文本里删 ```ops 块（人看的解读不展示 JSON 骨架）。"""
     return _OPS_BLOCK_RE.sub("", text)
+
+
+# ── 模型配置读写（运行时切换，供 web_server /settings/llm 使用）──────────────
+
+# 配置写锁：并发 POST 时串行化，避免两个请求同时写坏 config JSON
+_config_write_lock = threading.Lock()
+
+
+def _mask_key(key: str) -> str:
+    """脱敏 API key：保留头尾各 4 位，中间打码。过短则整体打码。"""
+    k = (key or "").strip()
+    if len(k) <= 8:
+        return "*" * len(k) if k else ""
+    return f"{k[:4]}****{k[-4:]}"
+
+
+def get_llm_config_view() -> dict:
+    """给 /settings/llm 的脱敏配置视图：只回显掩码，绝不暴露完整 key。"""
+    cfg = _load_llm_config().get("config", {})
+    return {
+        "model": cfg.get("model", "deepseek-v4-flash"),
+        "base_url": cfg.get("base_url", DEEPSEEK_BASE_URL),
+        "api_key_masked": _mask_key(cfg.get("api_key", "") or _api_key()),
+        "llm_configured": has_api_key(),
+    }
+
+
+def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
+    """运行时保存模型配置到 agent_llm_config.json（原子写 + 锁）。
+
+    - model / base_url 直接覆盖
+    - api_key 为空字符串 → 不覆盖已存 key（允许只改名字/URL）
+    - api_key 非空但 < 8 字符 → 抛 ValueError（前端已校验，后端双保险）
+    - 保留 config 里其它字段（temperature/top_p/...）与顶层 sp/tools
+
+    返回写入后的配置视图。
+    """
+    global _llm_cache
+    with _config_write_lock:
+        key_raw = (api_key or "").strip()
+        if key_raw and len(key_raw) < 8:
+            raise ValueError(f"API Key 过短（{len(key_raw)} 位），至少 8 位")
+
+        path = _resolve_llm_config_path()
+        # 基底：读现有文件（保留 sp/tools 等非 config 字段）
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                full = json.load(f)
+        except Exception:
+            full = _load_llm_config()  # 文件缺失/损坏 → 用默认基底
+
+        if not isinstance(full, dict):
+            full = {}
+        cfg = full.get("config") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+            full["config"] = cfg
+
+        if model is not None and str(model).strip():
+            cfg["model"] = str(model).strip()
+        if base_url is not None and str(base_url).strip():
+            cfg["base_url"] = str(base_url).strip()
+        if key_raw:
+            cfg["api_key"] = key_raw
+
+        full["config"] = cfg
+
+        # 原子写：临时文件 + os.replace，避免半截写入损坏配置
+        tmp = None
+        try:
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=d or ".", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(full, f, ensure_ascii=False, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            tmp = None
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    # 强制重建 LLM client（缓存失效；虽然 _get_llm 有签名比对，显式置 None 更保险）
+    with _llm_cache_lock:
+        _llm_cache = None
+
+    return get_llm_config_view()
+
+
+def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
+    """连通性探测：发一次最小请求验证 model+base_url+key 是否可用。
+
+    返回：
+    - {"ok": bool, "status_code": int|None, "error": str, "latency_ms": int}
+    - 超时 5s，避免拖慢保存体验
+    - 用 max_tokens=1 极简请求，几乎不消耗额度
+    """
+    import time as _time
+    try:
+        from requests import post, exceptions
+    except ImportError:
+        return {"ok": False, "status_code": None, "error": "requests 库不可用，跳过连通性探测", "latency_ms": 0}
+
+    url = (base_url or "").strip().rstrip("/") + "/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {(api_key or '').strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": (model or "").strip(),
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
+    t0 = _time.time()
+    try:
+        resp = post(url, headers=headers, json=payload, timeout=5, verify=True)
+        latency = int((_time.time() - t0) * 1000)
+        if resp.status_code == 200:
+            return {"ok": True, "status_code": 200, "error": "", "latency_ms": latency}
+        return {"ok": False, "status_code": resp.status_code, "error": f"HTTP {resp.status_code}: {resp.text[:200]}", "latency_ms": latency}
+    except exceptions.Timeout:
+        latency = int((_time.time() - t0) * 1000)
+        return {"ok": False, "status_code": None, "error": f"探测超时（>5s）", "latency_ms": latency}
+    except exceptions.ConnectionError as e:
+        latency = int((_time.time() - t0) * 1000)
+        return {"ok": False, "status_code": None, "error": f"连接失败: {e}", "latency_ms": latency}
+    except Exception as e:  # noqa: BLE001
+        latency = int((_time.time() - t0) * 1000)
+        return {"ok": False, "status_code": None, "error": f"探测异常: {e}", "latency_ms": latency}

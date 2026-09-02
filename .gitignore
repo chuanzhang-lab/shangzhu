@@ -65,6 +65,9 @@ reports/
 # 含 API Key 的配置文件
 config/agent_llm_config.json
 
+# 本地存储配置（用户专属，含连接串）
+config/storage.json
+
 # 外部工具元数据
 .workbuddy/
 .hermes/
@@ -77,3 +80,4 @@ web_server.log
 *.log
 logs/
 reports/
+config/*.bak

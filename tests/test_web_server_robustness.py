@@ -21,10 +21,11 @@ from fastapi.testclient import TestClient
 # 桩掉 LLM 调用（不真实联网），专注 HTTP/路由/解析层
 ws.llm_advise = lambda scan, user_text="", session_snapshot=None: {"text": "", "ops": []}
 _client = TestClient(ws.app)
+_XHR = {"X-Requested-With": "XMLHttpRequest"}
 
 
 def _chat(messages, tid="rb"):
-    return _client.post("/chat", json={"messages": messages, "thread_id": tid})
+    return _client.post("/chat", json={"messages": messages, "thread_id": tid}, headers=_XHR)
 
 
 def test_health_ok():
@@ -46,7 +47,7 @@ def test_only_assistant_400():
 
 def test_missing_messages_field_422():
     # 缺 messages 字段 → Pydantic 校验 422（框架层，防止未来模型破坏致 500）
-    r = _client.post("/chat", json={"thread_id": "x"})
+    r = _client.post("/chat", json={"thread_id": "x"}, headers=_XHR)
     assert r.status_code == 422
 
 

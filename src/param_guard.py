@@ -296,6 +296,7 @@ def validate_params(
     params: Dict[str, Any],
     industry: Optional[str] = None,
     history_params: Optional[Dict[str, Any]] = None,
+    is_continuation: bool = False,
 ) -> Dict[str, Any]:
     """对一批参数做归一化 + 校验 + 历史矛盾检测。
 
@@ -337,7 +338,7 @@ def validate_params(
         # 3) 历史矛盾检测
         if history_params and field in history_params:
             old = history_params[field]
-            if _values_conflict(field, old, value):
+            if _values_conflict(field, old, value, is_continuation=is_continuation):
                 contradictions.append({
                     "field": field,
                     "old_value": old,
@@ -360,19 +361,31 @@ def validate_params(
     }
 
 
-def _values_conflict(field: str, old: Any, new: Any) -> bool:
-    """判断同字段新旧值是否构成矛盾（比例类容差，数值类差异>10%且量级差异）。"""
+def _values_conflict(field: str, old: Any, new: Any,
+                     is_continuation: bool = False) -> bool:
+    """判断同字段新旧值是否构成矛盾。
+
+    Direction 2（改主意权）：当 is_continuation=True 时（用户明确说「改成/改为/调整」），
+    放宽阈值——大幅变更是用户主动行为，不是笔误。
+    - continuation=True：比例类 >200%、数值类 >100x 才判矛盾
+    - continuation=False：比例类 >50%、数值类 >10x 判矛盾（原逻辑）
+    """
     if old is None or new is None:
         return False
     if isinstance(old, (int, float)) and isinstance(new, (int, float)):
         if old == 0:
             return new != 0
         ratio = abs(new - old) / abs(old)
-        # 比例类字段：0.6 vs 60 是矛盾；0.6 vs 0.65 是调整
-        if field in ("variable_cost_ratio", "gross_margin", "monthly_growth_rate"):
-            return ratio > 0.5  # 差异超 50% 视为矛盾
-        # 一般数值：差异超 10 倍视为矛盾（可能是单位误读）
-        return ratio > 10
+        if is_continuation:
+            # 用户明确说「改成」：大幅变更是预期行为
+            if field in ("variable_cost_ratio", "gross_margin", "monthly_growth_rate"):
+                return ratio >= 2.0  # 比例类 >=200% 判（0.5→1.5 = ratio 2.0，不可能合法）
+            return ratio >= 100      # 数值类 >=100x 判（8000→800000 明显笔误）
+        else:
+            # 未明确改参意图：保持严格阈值
+            if field in ("variable_cost_ratio", "gross_margin", "monthly_growth_rate"):
+                return ratio > 0.5
+            return ratio > 10
     return str(old).strip() != str(new).strip()
 
 
@@ -430,10 +443,12 @@ def guard_merge(
     new_params: Dict[str, Any],
     history_params: Optional[Dict[str, Any]],
     industry: Optional[str] = None,
+    is_continuation: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """会话合并前调用：检测历史矛盾 + 归一化。
 
     返回 (cleaned, guard_info)。cleaned 已含修正值，但 contradictions 需调用方决定是否应用。
     """
-    res = validate_params(new_params, industry=industry, history_params=history_params)
+    res = validate_params(new_params, industry=industry, history_params=history_params,
+                          is_continuation=is_continuation)
     return res["cleaned"], res

@@ -77,6 +77,7 @@ from session_state import (
     hydrate_session,
     session_stats,
     to_llm_view,
+    infer_focus_fields,
 )
 
 # 工具（直调，不走 LLM）
@@ -99,7 +100,9 @@ from llm_advisor import (
     get_model_name,
     get_base_url,
     has_api_key,
+    test_llm_config,
 )
+from config.settings import get_llm_config_view, save_llm_config
 from op_executor import (
     preview_op,
     apply_op,
@@ -473,13 +476,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="创业者工作台", lifespan=lifespan)
+
+# CORS：收紧为白名单，避免任意恶意站点跨站操作
+_ALLOWED_ORIGINS = ["http://127.0.0.1:8080", "http://localhost:8080"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Requested-With"],
 )
+
+
+@app.middleware("http")
+async def require_xhr_for_writes(request: Request, call_next):
+    """POST/PUT/DELETE 要求 X-Requested-With 头，防止恶意站点 <form> 跨站伪造。"""
+    if request.method in ("POST", "PUT", "DELETE"):
+        if request.headers.get("X-Requested-With", "").lower() != "xmlhttprequest":
+            return JSONResponse({"error": "missing X-Requested-With header"}, status_code=403)
+    return await call_next(request)
 
 # M3：前端静态资源（app.css / app.js）从 CHAT_HTML 内联抽取为独立文件，
 # 由 FastAPI StaticFiles 挂载到 /static。抽取后 CHAT_HTML 仅剩 HTML 骨架。
@@ -496,12 +511,15 @@ CHAT_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>创业者工作台</title>
-<link rel="stylesheet" href="/static/app.css?v=20260824b">
+<link rel="stylesheet" href="/static/app.css?v=20260902a">
 </head>
 <body>
 <header>
-  <h1>创业者工作台 <span style="opacity:0.5;font-size:12px;">· __MODEL_NAME__</span></h1>
-  <span class="meta" id="status">连接中...</span>
+  <h1>创业者工作台 <span id="model-name" style="opacity:0.5;font-size:12px;">· __MODEL_NAME__</span></h1>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <button id="settings-btn" title="LLM 配置">⚙️</button>
+    <span class="meta" id="status" title="点击设置大模型">连接中...</span>
+  </div>
 </header>
 <div id="layout">
   <aside id="sidebar">
@@ -567,9 +585,27 @@ CHAT_HTML = """<!DOCTYPE html>
     <div id="advisor-list" style="display:none;"></div>
   </aside>
 </div>
-<script src="/static/app.js?v=20260824b"></script>
+<script src="/static/app.js?v=20260902a"></script>
 </body>
 </html>
+"""
+
+SETTINGS_MODAL_HTML = """
+<div class="modal-overlay" id="settings-modal" style="display:none;">
+  <div class="modal-box">
+    <div class="modal-title">⚙️ LLM 配置</div>
+    <label class="modal-label">模型名称</label>
+    <input class="modal-input" id="cfg-model" placeholder="例如: deepseek-v4-flash">
+    <label class="modal-label">API 端点 (base_url)</label>
+    <input class="modal-input" id="cfg-base-url" placeholder="https://api.longcat.chat/openai">
+    <label class="modal-label">API Key</label>
+    <input class="modal-input" id="cfg-api-key" type="password" placeholder="sk-...">
+    <div class="modal-actions">
+      <button class="modal-btn cancel" id="cfg-cancel">取消</button>
+      <button class="modal-btn save" id="cfg-save">保存</button>
+    </div>
+  </div>
+</div>
 """
 
 
@@ -577,8 +613,9 @@ CHAT_HTML = """<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    # 配置单源：页脚模型名运行时注入（占位符替换，避免 f-string 与 CSS 花括号冲突）
-    return CHAT_HTML.replace("__MODEL_NAME__", MODEL_NAME)
+    # 配置单源：模型名运行时注入（占位符替换，避免 f-string 与 CSS 花括号冲突）
+    # 动态读取，保证用户通过 /settings/llm 保存后刷新页面即看到新名，无需重启
+    return CHAT_HTML.replace("__MODEL_NAME__", get_model_name())
 
 
 @app.get("/health")
@@ -587,14 +624,86 @@ async def health():
     stats = session_stats()
     return {
         "status": "ok",
-        "model": MODEL_NAME,
-        "endpoint": ENDPOINT,
+        "model": get_model_name(),
+        "endpoint": get_base_url(),
         "version": APP_VERSION,
         "uptime_seconds": uptime_seconds,
         "llm_configured": has_api_key(),
         "sessions": stats,
         "store_backend": type(get_store()).__name__,
     }
+
+
+# ── 模型设置 API（运行时切换 LLM 配置）──────────────────────────────────────
+@app.get("/settings/llm")
+async def get_llm_settings():
+    """读取当前模型配置（脱敏，key 只回显掩码）。"""
+    return get_llm_config_view()
+
+
+@app.post("/settings/llm")
+async def set_llm_settings(req: Request):
+    """保存模型配置（model / base_url / api_key，key 空则不覆盖）。"""
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "请求体需为 JSON"}, status_code=400)
+
+    model = body.get("model", "")
+    base_url = body.get("base_url", "")
+    api_key = body.get("api_key", "")
+
+    if not str(model).strip():
+        return JSONResponse({"error": "模型名称不能为空"}, status_code=400)
+    if api_key and len(api_key.strip()) < 8:
+        return JSONResponse({"error": f"API Key 过短（{len(api_key.strip())} 位），至少 8 位"}, status_code=400)
+
+    try:
+        view = save_llm_config(model, base_url, api_key)
+    except ValueError as e:
+        # 参数校验失败（如 API Key 过短）→ 400
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("保存模型配置失败")
+        return JSONResponse({"error": f"保存失败: {e}"}, status_code=500)
+
+    return JSONResponse({"ok": True, **view})
+
+
+@app.post("/settings/llm/test")
+async def test_llm_settings(req: Request):
+    """连通性探测：验证 model+base_url+key 是否可用。"""
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "请求体需为 JSON"}, status_code=400)
+
+    model = body.get("model", "").strip()
+    base_url = body.get("base_url", "").strip()
+    api_key = body.get("api_key", "")
+
+    if not model:
+        return JSONResponse({"error": "模型名称不能为空"}, status_code=400)
+    if not base_url:
+        return JSONResponse({"error": "接口 URL 不能为空"}, status_code=400)
+    # key 为空时，尝试用现有配置中的 key（保存时"留空=不修改"，测试时需要用实际 key）
+    if not api_key:
+        try:
+            from config.settings import load
+            current = load()
+            api_key = current.get("config", {}).get("api_key", "")
+        except Exception:
+            pass
+    if not api_key:
+        return JSONResponse({"error": "API Key 不能为空"}, status_code=400)
+
+    try:
+        result = test_llm_config(model, base_url, api_key)
+    except Exception as e:
+        logger.exception("连通性探测失败")
+        return JSONResponse({"ok": False, "error": f"探测失败: {e}"}, status_code=500)
+
+    return JSONResponse(result)
 
 
 # ── 任务 CRUD API（Task 4）──────────────────────────────────────────────────
@@ -948,7 +1057,7 @@ async def chat(req: ChatRequest):
                         llm_advise,
                         routed["data"],
                         last_user_msg,
-                        to_llm_view(tid),
+                        to_llm_view(tid, focus_fields=infer_focus_fields(last_user_msg)),
                     )
                     advice_text = advice.get("text", "") if isinstance(advice, dict) else (advice or "")
                     ops_proposals = advice.get("ops", []) if isinstance(advice, dict) else []
@@ -1008,7 +1117,7 @@ async def chat(req: ChatRequest):
         # 不引入自由 agent，避免编造未在会话中出现的具体数字（如历史 bug「成都冒菜店/7.5万」）。
         snapshot = get_state(tid)
         grounding = get_session_context(tid)
-        clean_view = to_llm_view(tid)
+        clean_view = to_llm_view(tid, focus_fields=infer_focus_fields(last_user_msg))
         # 用当前会话状态构造 scan，供 Steward 接地解读（无状态则空 scan）
         try:
             params_json = json.dumps(snapshot.get("params", {}), ensure_ascii=False)
@@ -1072,7 +1181,7 @@ async def chat(req: ChatRequest):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="创业者工作台 — 本地 Web 服务 (A)")
-    parser.add_argument("-p", "--port", type=int, default=8080, help="HTTP 端口")
+    parser.add_argument("-p", "--port", type=int, default=8081, help="HTTP 端口")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址")
     args = parser.parse_args()
 

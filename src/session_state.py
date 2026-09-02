@@ -16,7 +16,7 @@
 
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 # thread_id -> 会话状态
 _SESSIONS: Dict[str, dict] = {}
@@ -73,6 +73,54 @@ _FIELD_LABELS = {
 }
 
 
+# ── 参数语义分组（用户心智模型的代码映射）──────────────────────────────────
+# Direction 1：让 LLM 理解参数之间的维度关系，而非面对一堆散落的 key-value。
+PARAM_GROUPS = {
+    "收入模型": ["monthly_revenue", "daily_traffic", "price_per_unit"],
+    "成本结构": [
+        "monthly_rent", "employee_count", "avg_salary",
+        "variable_cost_ratio", "variable_cost_rate", "unit_variable_cost",
+        "monthly_expense", "utilities", "packaging", "commission", "other_fixed",
+    ],
+    "投资与跑道": ["total_investment"],
+    "行业与定位": ["industry", "city", "stage"],
+}
+
+# 反向索引：field → group name（O(1) 查找）
+_FIELD_TO_GROUP: Dict[str, str] = {}
+for _grp, _fields in PARAM_GROUPS.items():
+    for _f in _fields:
+        _FIELD_TO_GROUP[_f] = _grp
+
+
+# ── 关注字段推断（Direction 5：长会话注意力）────────────────────────────────
+# 从用户文本推断当前关注的参数字段，供 to_llm_view 做相关性过滤。
+_FIELD_KEYWORDS = {
+    "客流": "daily_traffic", "卖": "daily_traffic", "每天": "daily_traffic",
+    "日均": "daily_traffic", "日售": "daily_traffic", "杯": "daily_traffic",
+    "租金": "monthly_rent", "房租": "monthly_rent", "月租": "monthly_rent", "铺租": "monthly_rent",
+    "客单价": "price_per_unit", "单价": "price_per_unit", "售价": "price_per_unit",
+    "人工": "employee_count", "员工": "employee_count", "人数": "employee_count",
+    "薪资": "avg_salary", "工资": "avg_salary", "月薪": "avg_salary",
+    "变动成本": "variable_cost_ratio", "成本率": "variable_cost_ratio",
+    "投资": "total_investment", "投入": "total_investment", "启动资金": "total_investment",
+    "营收": "monthly_revenue", "收入": "monthly_revenue", "月收": "monthly_revenue", "流水": "monthly_revenue",
+    "利润": "monthly_profit", "盈利": "monthly_profit", "亏损": "monthly_profit",
+    "水电": "utilities", "包装": "packaging", "提成": "commission",
+}
+
+
+def infer_focus_fields(text: str) -> Optional[List[str]]:
+    """从用户文本推断关注的参数字段。返回 None 表示不过滤（全量输出）。"""
+    if not text:
+        return None
+    fields = []
+    for keyword, field in _FIELD_KEYWORDS.items():
+        if keyword in text:
+            fields.append(field)
+    return list(set(fields)) if fields else None
+
+
 def _new_state() -> dict:
     return {
         "params": {},           # A 类 + C 类字段
@@ -84,6 +132,8 @@ def _new_state() -> dict:
         # P0：用户确认采纳的行业/LLM 候选假设（basis=hypothesis 的来源登记）
         #   形如 {"avg_salary": {"value": 7000, "industry": "餐饮"}}
         "_accepted_hypotheses": {},
+        # Direction 4：写入版本号（每次 apply_turn_guarded +1，可观测 + 未来 CAS 基础）
+        "_version": 0,
     }
 
 
@@ -142,7 +192,8 @@ def merge_params(old: dict, new: dict) -> dict:
     return merged
 
 
-def merge_params_guarded(old: dict, new: dict, industry: str = "") -> tuple[dict, dict]:
+def merge_params_guarded(old: dict, new: dict, industry: str = "",
+                         is_continuation: bool = False) -> tuple[dict, dict]:
     """带守门的合并：先检测历史矛盾，再合并。
 
     返回 (merged, guard_info)。guard_info 含 contradictions / needs_confirmation，
@@ -154,7 +205,8 @@ def merge_params_guarded(old: dict, new: dict, industry: str = "") -> tuple[dict
     new_meta = {k: v for k, v in (new or {}).items() if k.startswith("_")}
     new_biz = {k: v for k, v in (new or {}).items() if not k.startswith("_")}
 
-    cleaned, guard = guard_merge(new_biz, old or {}, industry=industry or None)
+    cleaned, guard = guard_merge(new_biz, old or {}, industry=industry or None,
+                                 is_continuation=is_continuation)
 
     # 抽取时已拦截的「6000%」等信号存在 new_meta["_guard"]，须并入最终 guard，
     # 否则清洗后的干净值会让「请确认」信号在合并时丢失。
@@ -222,8 +274,11 @@ def apply_turn_guarded(thread_id: str, new_params: dict, new_raw: str = "",
         # ── 第一步：所有字段统一走守门（归一化 + 校验 + 矛盾检测）──
         # B 类字段（如 variable_cost_ratio=6000）必须也经过 validate_params 归一化
         # 成 60 → CRITICAL 自动修正 0.6，否则 6000 会绕过检测直接污染 params。
+        # Direction 2：检测续算意图，传递给守门层放宽矛盾阈值
+        continuation = is_continuation(new_raw)
         merged, guard = merge_params_guarded(
-            st["params"], new_params, industry=industry or st.get("industry") or ""
+            st["params"], new_params, industry=industry or st.get("industry") or "",
+            is_continuation=continuation
         )
 
         # ── 第二步：从已验证的 merged 中分离 B 类字段 ──
@@ -253,6 +308,7 @@ def apply_turn_guarded(thread_id: str, new_params: dict, new_raw: str = "",
         if new_raw:
             st["raw_text"] = _truncate_raw((st["raw_text"] + " " + new_raw).strip())
         st["turn"] += 1
+        st["_version"] = st.get("_version", 0) + 1
         # 本轮变更：只记业务字段的 diff（元数据/守门信息不进 LLM 视野）
         st["_last_changes"] = _compute_param_diff(old_params, merged)
         # 把本回合的守门信息挂到 state，web_server 可读取并前置展示
@@ -331,22 +387,68 @@ def get_accepted_hypotheses(thread_id: str) -> dict:
         return dict(st.get("_accepted_hypotheses") or {})
 
 
-def to_llm_view(thread_id: str) -> dict:
+def to_llm_view(thread_id: str, focus_fields: Optional[List[str]] = None) -> dict:
     """给 LLM 的清洁会话视图：去掉 raw_text 与内部字段，含本轮变更。
+
+    Direction 1 增强：按语义分组输出参数（grouped_params），让 LLM 理解维度关系。
+    Direction 3 增强：输出已采纳假设（accepted_hypotheses），非参数真相维。
+    Direction 5 增强：focus_fields 不为 None 时，只输出相关参数 + 核心派生参数，
+    其余压缩为摘要字符串，减少长会话中无关参数对 LLM 注意力的干扰。
 
     关键：raw_text 含历史用户原文（如「人工3500*2」），喂给 LLM 会引发
     「引擎还在用旧值」式对账幻觉。只给 LLM 当前 params / industry / turn /
     本轮变更，让它基于「当前真实状态」讲话。
     """
+    # 核心派生参数（引擎结果，无论 focus 与否都必须给 LLM）
+    _CORE_FIELDS = {
+        "monthly_revenue", "monthly_fixed_cost", "monthly_profit",
+        "runway_months", "daily_breakeven", "monthly_labor",
+        "monthly_labor_cash", "labor_burden_rate",
+    }
     with _LOCK:
         st = get_state(thread_id)
-        view = {
-            "params": {k: v for k, v in (st.get("params") or {}).items()
-                       if not k.startswith("_")},
-            "industry": st.get("industry"),
-            "turn": st.get("turn", 0),
-            "last_changes": st.get("_last_changes", {}),
-        }
+        raw_params = {k: v for k, v in (st.get("params") or {}).items()
+                      if not k.startswith("_")}
+        hypotheses = dict(st.get("_accepted_hypotheses") or {})
+
+    # Direction 5：相关性过滤
+    if focus_fields:
+        relevant = set(focus_fields) | _CORE_FIELDS
+        focused = {k: v for k, v in raw_params.items() if k in relevant}
+        rest = {k: v for k, v in raw_params.items() if k not in relevant}
+        params_for_view = focused
+        params_summary = (
+            "其他已知参数（本轮未涉及）：" + "、".join(
+                f"{k}={v}" for k, v in rest.items()
+            )
+        ) if rest else ""
+    else:
+        params_for_view = raw_params
+        params_summary = ""
+
+    # Direction 1：按语义分组
+    grouped = {}
+    all_grouped_fields = set()
+    for group, fields in PARAM_GROUPS.items():
+        gp = {f: params_for_view[f] for f in fields if f in params_for_view}
+        if gp:
+            grouped[group] = gp
+            all_grouped_fields.update(gp.keys())
+    orphan = {k: v for k, v in params_for_view.items()
+              if k not in all_grouped_fields}
+    if orphan:
+        grouped["_其他"] = orphan
+
+    view = {
+        "params": params_for_view,
+        "grouped_params": grouped,
+        "params_summary": params_summary,
+        "accepted_hypotheses": hypotheses,
+        "industry": st.get("industry"),
+        "turn": st.get("turn", 0),
+        "version": st.get("_version", 0),
+        "last_changes": st.get("_last_changes", {}),
+    }
     return view
 
 

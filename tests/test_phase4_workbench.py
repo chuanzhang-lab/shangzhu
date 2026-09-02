@@ -567,7 +567,7 @@ def test_p49_chitchat_uses_steward():
         resp = c.post("/chat", json={
             "messages": [{"role": "user", "content": "随便聊聊，今天心情不错"}],
             "thread_id": "p49-steward",
-        })
+        }, headers={"X-Requested-With": "XMLHttpRequest"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body.get("mode") == "steward", body

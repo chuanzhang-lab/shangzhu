@@ -60,7 +60,7 @@ def _ensure_stub():
 
 
 def _chat(text, tid):
-    return _client.post("/chat", json={"messages":[{"role":"user","content":text}], "thread_id": tid}).json()
+    return _client.post("/chat", json={"messages":[{"role":"user","content":text}], "thread_id": tid}, headers={"X-Requested-With": "XMLHttpRequest"}).json()
 
 
 def _scan_d(d):
