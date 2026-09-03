@@ -28,10 +28,11 @@ _test_store = MemoryStore()
 web_server.get_store = lambda: _test_store
 
 client = TestClient(web_server.app)
+_XHR = {"X-Requested-With": "XMLHttpRequest"}
 
 
 def test_create_and_list_task():
-    r = client.post("/tasks", json={"name": "我的咖啡店"})
+    r = client.post("/tasks", json={"name": "我的咖啡店"}, headers=_XHR)
     assert r.status_code == 200
     tid = r.json()["id"]
     assert r.json()["name"] == "我的咖啡店"
@@ -41,21 +42,21 @@ def test_create_and_list_task():
 
 
 def test_default_task_name():
-    r = client.post("/tasks", json={})
+    r = client.post("/tasks", json={}, headers=_XHR)
     assert r.status_code == 200
     assert r.json()["name"] == "新任务"
 
 
 def test_rename_task():
-    tid = client.post("/tasks", json={"name": "旧名"}).json()["id"]
-    r = client.put(f"/tasks/{tid}/rename", json={"name": "新名"})
+    tid = client.post("/tasks", json={"name": "旧名"}, headers=_XHR).json()["id"]
+    r = client.put(f"/tasks/{tid}/rename", json={"name": "新名"}, headers=_XHR)
     assert r.status_code == 200
     tasks = client.get("/tasks").json()
     assert next(t["name"] for t in tasks if t["id"] == tid) == "新名"
 
 
 def test_messages_roundtrip():
-    tid = client.post("/tasks", json={"name": "T"}).json()["id"]
+    tid = client.post("/tasks", json={"name": "T"}, headers=_XHR).json()["id"]
     assert client.get(f"/tasks/{tid}/messages").json() == []
     # 通过 chat 写入（当前 chat 未接 task 持久化前，先直接走 store）
     from storage.local_store import get_store
@@ -67,8 +68,8 @@ def test_messages_roundtrip():
 
 
 def test_soft_delete():
-    tid = client.post("/tasks", json={"name": "删"}).json()["id"]
-    r = client.delete(f"/tasks/{tid}")
+    tid = client.post("/tasks", json={"name": "删"}, headers=_XHR).json()["id"]
+    r = client.delete(f"/tasks/{tid}", headers=_XHR)
     assert r.status_code == 200
     assert r.json()["deleted"] is True
     assert tid not in {t["id"] for t in client.get("/tasks").json()}

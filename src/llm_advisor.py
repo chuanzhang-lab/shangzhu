@@ -60,7 +60,7 @@ def _api_key_from_env() -> str:
 
 
 def _api_key_from_config() -> str:
-    """从 config JSON 读取 API key（回退，会打 WARNING）。"""
+    """从 config JSON 读取 API key（配置单源，与 model/base_url 同源）。"""
     try:
         cfg = _load_llm_config()
         return (cfg.get("config", {}) or {}).get("api_key", "").strip()
@@ -69,31 +69,31 @@ def _api_key_from_config() -> str:
 
 
 def _api_key() -> str:
-    """运行期读取 API key，四级优先级。
+    """运行期读取 API key，配置单源优先（config → env → keyring）。
 
-    1) 环境变量 (DEEPSEEK_API_KEY / LONGCAT_API_KEY / LLM_API_KEY)
-    2) macOS Keyring (service="shangzhu-llm", account="api_key")
-    3) config/agent_llm_config.json（回退，打 WARNING）
+    1) config/agent_llm_config.json（用户在设置页保存的 key，与 model/base_url 同源）
+    2) 环境变量 (DEEPSEEK_API_KEY / LONGCAT_API_KEY / LLM_API_KEY)
+    3) macOS Keyring (service="shangzhu-llm", account="api_key")
     4) 空串（未配置）
+
+    config 必须优先：model / base_url 已经「配置单源」从 config 读取，若 key 反而
+    优先取环境变量，会出现「config 指向 LongCat、而 env 残留 DEEPSEEK_API_KEY(sk-…)」
+    的跨厂商错配，导致 401 invalid_api_key（无效的AppId）。env / keyring 仅在 config
+    未写 key 时兜底，兼容纯环境变量 / Keyring 部署。
     """
-    # 1) env
+    # 1) config（与 model/base_url 同源）
+    key = _api_key_from_config()
+    if key:
+        return key
+
+    # 2) env（兜底，兼容未在设置页存 key 的部署）
     key = _api_key_from_env()
     if key:
         return key
 
-    # 2) keyring
+    # 3) keyring
     key = _api_key_from_keyring("shangzhu-llm", "api_key")
     if key:
-        return key
-
-    # 3) config (回退)
-    key = _api_key_from_config()
-    if key:
-        logger.warning(
-            "api_key 以明文形式存储在 config/agent_llm_config.json，"
-            "建议迁移到 macOS Keyring（运行 `python scripts/migrate_key_to_keyring.py`）"
-            "或设置环境变量 DEEPSEEK_API_KEY / LONGCAT_API_KEY"
-        )
         return key
 
     return ""
@@ -370,6 +370,18 @@ def _get_llm() -> ChatOpenAI:
                 timeout = min(float(timeout), float(_LLM_TIMEOUT))
             except (TypeError, ValueError):
                 timeout = _LLM_TIMEOUT
+
+            # 绕过代理：当 HTTP_PROXY 环境变量设置时，LLM API 请求可能因代理
+            # 无法到达 api.longcat.chat 而超时。将 API 域名加入 NO_PROXY 绕过代理。
+            from urllib.parse import urlparse
+            _parsed = urlparse(base_url)
+            _domain = _parsed.hostname
+            if _domain:
+                for _var in ("NO_PROXY", "no_proxy"):
+                    _old = os.environ.get(_var, "")
+                    if _domain not in _old:
+                        os.environ[_var] = f"{_domain},{_old}" if _old else _domain
+
             client = ChatOpenAI(
                 model=model,
                 api_key=key,
@@ -667,6 +679,16 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
         from requests import post, exceptions
     except ImportError:
         return {"ok": False, "status_code": None, "error": "requests 库不可用，跳过连通性探测", "latency_ms": 0}
+
+    # 绕过代理：将 API 域名加入 NO_PROXY
+    from urllib.parse import urlparse
+    _parsed = urlparse(base_url)
+    _domain = _parsed.hostname
+    if _domain:
+        for _var in ("NO_PROXY", "no_proxy"):
+            _old = os.environ.get(_var, "")
+            if _domain not in _old:
+                os.environ[_var] = f"{_domain},{_old}" if _old else _domain
 
     url = (base_url or "").strip().rstrip("/") + "/chat/completions"
     headers = {

@@ -65,6 +65,32 @@ def test_advise_no_key_returns_empty():
             os.environ["DEEPSEEK_API_KEY"] = saved
 
 
+def test_api_key_prefers_config_over_env():
+    """API key 配置单源：config 里的 key 优先于环境变量（避免跨厂商错配 401）。
+
+    回归场景：用户 shell 残留 DEEPSEEK_API_KEY=sk-…(DeepSeek)，但设置页把 base_url
+    切到 LongCat 并保存了 ak_… key；若 env 优先，运行期会把 sk-… 发到 LongCat → 401
+    invalid_api_key（无效的AppId: sk）。
+    """
+    from unittest.mock import patch
+    saved = os.environ.get("DEEPSEEK_API_KEY")
+    os.environ["DEEPSEEK_API_KEY"] = "sk-999999999999999999999999999999"
+    try:
+        with patch.object(llm_advisor, "_load_llm_config", return_value={
+            "config": {
+                "model": "LongCat-2.0",
+                "base_url": "https://api.longcat.chat/openai",
+                "api_key": "ak_CONFIG_KEY",
+            }
+        }):
+            assert llm_advisor._api_key() == "ak_CONFIG_KEY"
+    finally:
+        if saved is None:
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+        else:
+            os.environ["DEEPSEEK_API_KEY"] = saved
+
+
 def test_advise_real_if_key():
     """有 key 时真实调一次 LLM；无 key 则跳过（避免 CI/本地无凭证失败）。"""
     if not llm_advisor.has_api_key():
