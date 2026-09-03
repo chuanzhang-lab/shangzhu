@@ -562,7 +562,7 @@ def test_p49_chitchat_uses_steward():
     saved_cwd = os.getcwd()
     try:
         # 桩：让 steward 返回可识别内容（不真实联网）
-        ws.llm_advise = lambda scan, user_text="", session_snapshot=None: "【STEWARD_OK】"
+        ws.llm_advise = lambda scan, user_text="", session_snapshot=None, context=None: "【STEWARD_OK】"
         c = TestClient(ws.app)
         resp = c.post("/chat", json={
             "messages": [{"role": "user", "content": "随便聊聊，今天心情不错"}],

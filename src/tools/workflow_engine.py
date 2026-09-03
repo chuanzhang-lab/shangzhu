@@ -586,6 +586,30 @@ def _derive_conf(param_sources: dict) -> dict:
     return conf
 
 
+def _derive_available_actions(params: dict, scenarios: dict) -> list:
+    """根据当前参数和情景，推导可用的下一步动作列表（供 LLM 主持人推荐）。"""
+    actions = ["quick_scan"]  # 始终可重新扫描
+
+    # 有利润数据 → 可对比、可趋势
+    if params.get("monthly_profit") is not None:
+        actions.append("compare_scenarios")
+        actions.append("trend_projection")
+
+    # 有 benchmark → 可看行业基准
+    if params.get("benchmark"):
+        actions.append("benchmark")
+
+    # 有情景分析 → 可看敏感性
+    if scenarios and scenarios.get("has_uncertainty"):
+        actions.append("sensitivity")
+
+    # 总投资已知 → 可看跑道
+    if params.get("available_cash") is not None:
+        actions.append("runway")
+
+    return actions
+
+
 def _check_sufficiency(params: dict, param_sources: dict) -> dict:
     """充分性门禁（决策B）。
 
@@ -1169,6 +1193,8 @@ def quick_scan(params_json: str) -> str:
             "benchmark_check": _benchmark_check(params, params["benchmark"]),
             # 行业典型成本结构占比（差异化参考）
             "industry_cost_structure": params.get("cost_structure", {}),
+            # 可用动作列表（供 LLM 主持人推荐下一步）
+            "available_actions": _derive_available_actions(params, scenarios),
         }
 
         return json.dumps(dashboard, ensure_ascii=False, indent=2)

@@ -274,6 +274,56 @@ def _render_guard_banner(guard_info: dict, scan: dict) -> str:
     return "## ⚠️ 参数守门（先确认，再计算）\n" + "\n".join(parts)
 
 
+def _build_advise_context(tid: str, scan: dict) -> dict:
+    """构建主持人模式所需的 context 对象，供 LLM 决定追问/推荐/静默。"""
+    st = get_state(tid)
+    meta = st.get("_advise_meta", {})
+    snap = to_llm_view(tid)
+
+    # 缺失参数（[param_sources] 含 [缺失] 的字段）
+    param_sources = (scan or {}).get("param_sources", {})
+    missing_params = [k for k, v in param_sources.items() if isinstance(v, str) and v.startswith("[缺失]")]
+
+    # 可用动作
+    available_actions = (scan or {}).get("available_actions", ["quick_scan"])
+
+    # 行业默认值标记（从 scan params 里判断哪些字段有非 None 值）
+    has_default = {}
+    scan_params = (scan or {}).get("params", {})
+    for field in ("daily_traffic", "price_per_unit", "variable_cost_ratio", "avg_salary", "employee_count"):
+        if scan_params.get(field) is not None:
+            has_default[field] = scan_params[field]
+
+    return {
+        "available_actions": available_actions,
+        "recommendation_count": meta.get("recommendation_count", 0),
+        "comparison_count": meta.get("comparison_count", 0),
+        "question_count": meta.get("question_count", 0),
+        "missing_params": missing_params,
+        "has_default": has_default,
+        "turn_number": st.get("turn", 0),
+        "industry": snap.get("industry"),
+    }
+
+
+def _reset_advise_meta(tid: str):
+    """新一轮对话（用户切换话题或新建任务）时重置计数器。"""
+    st = get_state(tid)
+    if "_advise_meta" not in st:
+        st["_advise_meta"] = {}
+    st["_advise_meta"]["recommendation_count"] = 0
+    st["_advise_meta"]["comparison_count"] = 0
+    st["_advise_meta"]["question_count"] = 0
+
+
+def _incr_advise_meta(tid: str, field: str):
+    """增加指定计数器（recommendation / comparison / question）。"""
+    st = get_state(tid)
+    if "_advise_meta" not in st:
+        st["_advise_meta"] = {}
+    st["_advise_meta"][field] = st["_advise_meta"].get(field, 0) + 1
+
+
 # 候选方案序号标签：A/B/C/D
 _OP_LABELS = ["A", "B", "C", "D", "E", "F"]
 
@@ -774,10 +824,13 @@ async def get_advisor(tid: str):
     scan = _build_scan_for_advisor(tid)
     param_sources = _get_param_sources_for_advisor(tid)
 
+    # 主持人模式：构建 context
+    advise_context = _build_advise_context(tid, scan)
+
     # 调用 LLM（与 /chat 同源 advise，非阻塞）
     try:
         advice = await asyncio.to_thread(
-            llm_advise, scan, "", clean_view,
+            llm_advise, scan, "", clean_view, advise_context,
         )
     except Exception as e:
         logger.warning(f"顾问 LLM 调用失败: {e}")
@@ -1053,14 +1106,26 @@ async def chat(req: ChatRequest):
                     # 关键：llm_advise 内部是**同步阻塞**的 LLM 网络调用，必须用
                     # asyncio.to_thread 丢到线程池，否则会冻结整个 FastAPI 事件循环
                     # （所有并发请求一起卡死，最长可达 timeout 秒）。
+                    # 主持人模式：传入 context 让 LLM 决定追问/推荐/静默
+                    advise_context = _build_advise_context(tid, routed["data"])
                     advice = await asyncio.to_thread(
                         llm_advise,
                         routed["data"],
                         last_user_msg,
                         to_llm_view(tid, focus_fields=infer_focus_fields(last_user_msg)),
+                        advise_context,
                     )
                     advice_text = advice.get("text", "") if isinstance(advice, dict) else (advice or "")
                     ops_proposals = advice.get("ops", []) if isinstance(advice, dict) else []
+                    # 主持人模式：更新计数器（根据 LLM meta 判断 LLM 做了什么）
+                    if isinstance(advice, dict) and advice.get("meta"):
+                        m = advice["meta"]
+                        if m.get("made_recommendation"):
+                            _incr_advise_meta(tid, "recommendation_count")
+                        if m.get("suggested_comparison"):
+                            _incr_advise_meta(tid, "comparison_count")
+                        if m.get("asked_question"):
+                            _incr_advise_meta(tid, "question_count")
                     # L2 决策（D5）：LLM 解读禁止「建议你/你应该/必须…」倾向词。
                     # 命中任何倾向词 → 丢弃整段 LLM 解读，规则层客观结构独自成立。
                     if intent == "decide" and advice_text:
@@ -1136,8 +1201,9 @@ async def chat(req: ChatRequest):
             )
         advice_obj = {"text": "", "ops": []}
         try:
-            # 同样丢到线程池，避免阻塞事件循环（见步骤 2 说明）
-            advice_obj = await asyncio.to_thread(llm_advise, scan, user_text, clean_view)
+            # 主持人模式：传入 context
+            advise_context = _build_advise_context(tid, scan)
+            advice_obj = await asyncio.to_thread(llm_advise, scan, user_text, clean_view, advise_context)
         except Exception as e:  # noqa
             logger.warning(f"LLM 解读跳过: {e}")
         advice_text = advice_obj.get("text", "") if isinstance(advice_obj, dict) else (advice_obj or "")

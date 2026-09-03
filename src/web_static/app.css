@@ -1,13 +1,13 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f7f7f8; color: #1a1a1a; height: 100vh; display: flex; flex-direction: column; }
-  header { background: linear-gradient(135deg, #B87333 0%, #9A5F2E 100%); color: #fff; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  header { background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%); color: #fff; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
   header h1 { font-size: 16px; font-weight: 600; }
   header .meta { font-size: 12px; opacity: 0.6; }
   #layout { flex: 1; display: flex; min-height: 0; }
   #sidebar { width: 200px; background: #fff; border-right: 1px solid #e5e5e5; display: flex; flex-direction: column; min-height: 0; }
   #sidebar-head { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #eee; }
   #sidebar-head span { font-size: 13px; font-weight: 600; color: #333; }
-  #new-task { background: #B87333; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  #new-task { background: #1a1a1a; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
   #task-list { flex: 1; overflow-y: auto; padding: 6px; min-height: 0; }
   .task-item { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; color: #333; margin-bottom: 2px; }
   .task-item:hover { background: #f2f2f3; }
@@ -21,7 +21,7 @@
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #chat { flex: 1; overflow-y: auto; padding: 24px 16px; display: flex; flex-direction: column; gap: 12px; }
   .msg { max-width: 82%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; word-wrap: break-word; }
-  .msg.user { align-self: flex-end; background: #B87333; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.user { align-self: flex-end; background: #1a1a1a; color: #fff; border-bottom-right-radius: 4px; }
   .msg.assistant { align-self: flex-start; background: #fff; color: #1a1a1a; border: 1px solid #e5e5e5; border-bottom-left-radius: 4px; }
   .msg.assistant table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
   .msg.assistant th, .msg.assistant td { border: 1px solid #ddd; padding: 4px 8px; text-align: left; }
@@ -38,8 +38,8 @@
   /* 分类条 */
   #cat-bar { display: flex; gap: 4px; padding: 8px 16px; background: #fafafa; border-top: 1px solid #eee; overflow-x: auto; align-items: center; }
   .cat-btn { white-space: nowrap; background: #fff; border: 1px solid #d4d4d8; border-radius: 16px; padding: 5px 14px; font-size: 13px; cursor: pointer; color: #555; transition: all 0.15s; position: relative; flex-shrink: 0; }
-  .cat-btn:hover { background: #f0f0f1; color: #8A5528; }
-  .cat-btn.active { background: #B87333; color: #fff; border-color: #B87333; }
+  .cat-btn:hover { background: #f0f0f1; color: #1a1a1a; }
+  .cat-btn.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
   .cat-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .cat-btn:disabled:hover { background: #fff; color: #555; }
   .cat-badge { position: absolute; top: -2px; right: -2px; width: 8px; height: 8px; border-radius: 50%; background: #dc2626; border: 1px solid #fafafa; display: none; }
@@ -69,7 +69,7 @@
   /* 分析/决策动作按钮组 */
   #analyze-controls, #decide-controls { display: none; flex-wrap: wrap; gap: 6px; padding: 8px 16px; background: #fafafa; border-top: 1px solid #eee; }
   .panel-btn { white-space: nowrap; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; padding: 4px 12px; font-size: 12px; cursor: pointer; color: #555; transition: all 0.15s; flex-shrink: 0; }
-  .panel-btn:hover { background: #f0f0f1; color: #8A5528; border-color: #B87333; }
+  .panel-btn:hover { background: #f0f0f1; color: #1a1a1a; border-color: #1a1a1a; }
   .panel-btn:active { transform: scale(0.97); }
   /* 对比控件区 */
   #compare-controls { padding: 8px 16px; background: #fff; border-top: 1px solid #f0f0f0; display: none; }
@@ -82,21 +82,21 @@
   /* 导出按钮 */
   #export-btns { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid #eee; }
   .export-btn { background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: #555; transition: all 0.15s; }
-  .export-btn:hover:not(:disabled) { background: #f0f0f1; color: #8A5528; }
+  .export-btn:hover:not(:disabled) { background: #f0f0f1; color: #1a1a1a; }
   .export-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   #input-area { background: #fff; border-top: 1px solid #e5e5e5; padding: 12px 16px; display: flex; gap: 8px; align-items: flex-end; }
   #input { flex: 1; border: 1px solid #d4d4d4; border-radius: 10px; padding: 10px 12px; font-size: 14px; font-family: inherit; resize: none; outline: none; max-height: 160px; min-height: 40px; }
-  #input:focus { border-color: #B87333; }
-  #send { background: #B87333; color: #fff; border: none; border-radius: 10px; padding: 0 18px; height: 40px; font-size: 14px; cursor: pointer; transition: opacity 0.2s; }
+  #input:focus { border-color: #1a1a1a; }
+  #send { background: #1a1a1a; color: #fff; border: none; border-radius: 10px; padding: 0 18px; height: 40px; font-size: 14px; cursor: pointer; transition: opacity 0.2s; }
   #send:disabled { opacity: 0.4; cursor: not-allowed; }
-  #send:hover:not(:disabled) { background: #9A5F2E; }
+  #send:hover:not(:disabled) { background: #333; }
   #params-panel { width: 280px; background: #fff; border-left: 1px solid #e5e5e5; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   #params-head { padding: 12px 14px; border-bottom: 1px solid #eee; display: flex; align-items: center; justify-content: space-between; }
   #params-head span { font-size: 13px; font-weight: 600; color: #333; }
   #params-tabs { display: flex; gap: 4px; }
   .params-tab { background: #fff; border: 1px solid #d4d4d8; border-radius: 12px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: #555; transition: all 0.15s; }
   .params-tab:hover { background: #f0f0f1; }
-  .params-tab.active { background: #B87333; color: #fff; border-color: #B87333; }
+  .params-tab.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
   #params-recalc { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
   #params-recalc:hover { background: #1d4ed8; }
   #params-recalc:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -128,7 +128,7 @@
   .empty h2 { font-size: 18px; color: #1a1a1a; margin-bottom: 8px; }
   .examples { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 20px; max-width: 500px; }
   .example { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #555; cursor: pointer; text-align: left; transition: all 0.2s; }
-  .example:hover { border-color: #B87333; color: #8A5528; }
+  .example:hover { border-color: #1a1a1a; color: #1a1a1a; }
 
   /* F3 变更字段高亮：简短绿色淡入后恢复 */
   .param-row.just-updated { background: #ecfdf5; animation: hl-fade 2.2s ease-out forwards; }
@@ -136,22 +136,4 @@
 
   /* 分类视角切换：定位到的消息短暂描边高亮 */
   .msg.cat-focus { box-shadow: 0 0 0 2px #2563eb; transition: box-shadow 0.25s ease; }
-
-  /* 右上角模型名：可点击，hover 提示 */
-  #status { cursor: pointer; }
-  #status:hover { opacity: 1; text-decoration: underline; }
-
-  /* 模型设置弹窗 */
-  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-  .modal-box { background: #fff; border-radius: 12px; padding: 22px 24px; width: 360px; max-width: 90vw; box-shadow: 0 8px 30px rgba(0,0,0,0.2); }
-  .modal-title { font-size: 15px; font-weight: 600; color: #333; margin-bottom: 14px; }
-  .modal-label { display: block; font-size: 12px; color: #666; margin: 10px 0 4px 0; }
-  .modal-input { width: 100%; border: 1px solid #d4d4d4; border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box; }
-  .modal-input:focus { border-color: #B87333; }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-  .modal-btn { border-radius: 8px; padding: 7px 16px; font-size: 13px; cursor: pointer; }
-  .modal-btn.cancel { background: #fff; border: 1px solid #d4d4d8; color: #555; }
-  .modal-btn.cancel:hover { background: #f0f0f1; }
-  .modal-btn.save { background: #B87333; border: none; color: #fff; }
-  .modal-btn.save:hover { background: #9A5F2E; }
 

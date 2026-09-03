@@ -21,7 +21,7 @@ def client():
 @pytest.fixture
 def valid_tid(client):
     """创建有效任务并返回 tid。"""
-    r = client.post("/tasks", json={"name": "测试任务"}, headers={"X-Requested-With": "XMLHttpRequest"})
+    r = client.post("/tasks", json={"name": "测试任务"})
     return r.json()["id"]
 
 
@@ -83,7 +83,7 @@ class TestApplyAdvisorAction:
     def test_returns_ok_for_valid_op(self, client, valid_tid):
         """有效 op 返回 ok=true + applied=true。"""
         op = {"propose": "set", "field": "monthly_rent", "value": 12000}
-        r = client.post(f"/advisor/apply?tid={valid_tid}", json={"op": op}, headers={"X-Requested-With": "XMLHttpRequest"})
+        r = client.post(f"/advisor/apply?tid={valid_tid}", json={"op": op})
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True
@@ -92,7 +92,7 @@ class TestApplyAdvisorAction:
     def test_returns_reject_for_derived_field(self, client, valid_tid):
         """派生字段 op 被拒绝。"""
         op = {"propose": "set", "field": "monthly_fixed_cost", "value": 30000}
-        r = client.post(f"/advisor/apply?tid={valid_tid}", json={"op": op}, headers={"X-Requested-With": "XMLHttpRequest"})
+        r = client.post(f"/advisor/apply?tid={valid_tid}", json={"op": op})
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is False
@@ -101,10 +101,10 @@ class TestApplyAdvisorAction:
     def test_invalid_tid_returns_400(self, client):
         """无效 tid 返回 400。"""
         op = {"propose": "set", "field": "monthly_rent", "value": 12000}
-        r = client.post(f"/advisor/apply?tid=invalid", json={"op": op}, headers={"X-Requested-With": "XMLHttpRequest"})
+        r = client.post(f"/advisor/apply?tid=invalid", json={"op": op})
         assert r.status_code == 400
 
     def test_missing_op_returns_400(self, client, valid_tid):
         """缺 op 返回 400。"""
-        r = client.post(f"/advisor/apply?tid={valid_tid}", json={}, headers={"X-Requested-With": "XMLHttpRequest"})
+        r = client.post(f"/advisor/apply?tid={valid_tid}", json={})
         assert r.status_code == 400

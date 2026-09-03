@@ -134,6 +134,12 @@ def _new_state() -> dict:
         "_accepted_hypotheses": {},
         # Direction 4：写入版本号（每次 apply_turn_guarded +1，可观测 + 未来 CAS 基础）
         "_version": 0,
+        # 主持人模式：LLM 推荐/对比/追问计数器（用于节奏控制）
+        "_advise_meta": {
+            "recommendation_count": 0,
+            "comparison_count": 0,
+            "question_count": 0,
+        },
     }
 
 

@@ -2,26 +2,13 @@
 
 为 web_server 的多任务会话提供统一的 store 接口：
 - `BaseStore`: 抽象接口（契约）
-- `PostgresStore`: psycopg3 实现，落盘本机 PostgreSQL（**首选**）
-- `LocalFileStore`: JSON 文件实现（PG 不可用时的降级，**重启不丢**）
-- `MemoryStore`: 进程内实现（**仅测试用**，重启即丢）
-
-**降级链**（`get_store()`）：PostgresStore → LocalFileStore → MemoryStore。
-前两级都能跨重启存活；只有 MemoryStore 会丢数据，且它只在「PG 不可用 +
-本地文件也写不了」时兜底，届时打 ERROR 级日志。
+- `MemoryStore`: 进程内实现（测试 / PG 不可用时降级）
+- `PostgresStore`: psycopg3 实现，落盘本机 PostgreSQL（Task 3 补齐）
 
 **边界**：本模块只负责「任务的元数据 + 参数快照 + 消息历史」的存取，
 不碰引擎逻辑。`session_state.py` 仍是运行时唯一真相源，本模块是持久化副本。
 
 **软删**：`delete_task` 只置 `deleted_at`（归档），不物理删除消息。
-
-**历史教训（2026-08-30）**：psycopg 一度只声明在 `coze-platform` extra 里，
-`uv sync` 把它从 .venv 剪掉 → `import psycopg` 失败 → 静默降级内存 store →
-任务栏数据重启即丢，且降级日志没落盘（用的是模块 logger，没挂 handler），
-排查时日志里一行痕迹都没有。现改为：
-1. psycopg 进主依赖（护栏见 tests/test_persistence_guard.py）；
-2. 降级日志挂到 `web.local_store`（继承 web_server 的控制台+文件 handler）；
-3. 降级目标从「内存」换成「本地 JSON 文件」，即使没有 PG 也不丢数据。
 """
 from __future__ import annotations
 
@@ -32,13 +19,8 @@ import time
 import uuid
 from typing import List, Optional
 
-# 挂到 web_server 配置的 "web" logger 之下，继承其控制台 + logs/web_server.log
-# 双通道 handler——降级原因必须能在日志文件里查到，不能只走 stderr 的 lastResort。
-logger = logging.getLogger("web.local_store")
+import psycopg
 
-# 注意：psycopg 不在模块顶层导入。
-# 顶层 import psycopg 会让「最小依赖」声明失真——未装 Postgres 驱动时 import 即崩。
-# 改为在 PostgresStore 内部延迟导入，保证无驱动时服务仍能降级启动。
 
 
 class BaseStore:
@@ -122,72 +104,6 @@ class MemoryStore(BaseStore):
             self._msgs[task_id].append(
                 {"role": role, "content": content, "turn": turn}
             )
-            if len(self._msgs[task_id]) > _MAX_MESSAGES_PER_TASK:
-                self._msgs[task_id] = self._msgs[task_id][-_MAX_MESSAGES_PER_TASK:]
-
-    def get_messages(self, task_id: str) -> List[dict]:
-        return [dict(m) for m in self._msgs.get(task_id, [])]
-
-    def delete_task(self, task_id: str) -> None:
-        if task_id in self._tasks:
-            self._tasks[task_id]["deleted_at"] = time.time()
-            self._tasks[task_id]["updated_at"] = time.time()
-            self._msgs.pop(task_id, None)
-
-    def close(self) -> None:
-        pass
-
-
-# 单任务消息数上限，防止长期运行内存无限增长
-_MAX_MESSAGES_PER_TASK = 500
-
-
-class MemoryStore(BaseStore):
-    """进程内实现，测试与降级用。"""
-
-    def __init__(self) -> None:
-        self._tasks: dict = {}
-        self._msgs: dict = {}
-
-    def create_task(self, name: str) -> dict:
-        tid = str(uuid.uuid4())
-        now = time.time()
-        t = {
-            "id": tid,
-            "name": name,
-            "params": {},
-            "industry": None,
-            "turn": 0,
-            "created_at": now,
-            "updated_at": now,
-            "deleted_at": None,
-        }
-        self._tasks[tid] = t
-        self._msgs[tid] = []
-        return dict(t)
-
-    def list_tasks(self) -> List[dict]:
-        return [dict(t) for t in self._tasks.values() if t["deleted_at"] is None]
-
-    def get_task(self, task_id: str) -> Optional[dict]:
-        t = self._tasks.get(task_id)
-        return dict(t) if t else None
-
-    def rename_task(self, task_id: str, name: str) -> None:
-        if task_id in self._tasks:
-            self._tasks[task_id]["name"] = name
-            self._tasks[task_id]["updated_at"] = time.time()
-
-    def update_params(self, task_id: str, params: dict) -> None:
-        if task_id in self._tasks:
-            self._tasks[task_id]["params"] = dict(params or {})
-            self._tasks[task_id]["updated_at"] = time.time()
-
-    def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
-        if task_id in self._msgs:
-            self._msgs[task_id].append(
-                {"role": role, "content": content, "turn": turn}
-            )
             # R1 修复：限制单任务消息数上限，超出淘汰最旧
             if len(self._msgs[task_id]) > _MAX_MESSAGES_PER_TASK:
                 self._msgs[task_id] = self._msgs[task_id][-_MAX_MESSAGES_PER_TASK:]
@@ -206,176 +122,13 @@ class MemoryStore(BaseStore):
         pass
 
 
-# ── 本地 JSON 文件 store（PG 不可用时的持久化降级）──────────────────────────
-# 放在仓库根的 data/ 下，跨进程重启存活。写盘用「临时文件 + os.replace」原子
-# 替换，避免写到一半崩溃留下半截 JSON 把整个 store 打坏。
-
-
-def _file_store_path() -> str:
-    """本地文件 store 路径。可用 LOCAL_STORE_PATH 覆盖（测试用临时目录）。
-
-    以 __file__ 定位仓库根，不依赖 cwd——web_server 启动时会 chdir 到 src/。
-    """
-    override = os.getenv("LOCAL_STORE_PATH")
-    if override:
-        return override
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(root, "data", "local_store.json")
-
-
-class LocalFileStore(BaseStore):
-    """JSON 文件实现：PG 不可用时的降级目标，**重启不丢数据**。
-
-    内存 dict 作读写缓存，每次写操作后整量落盘（本地单用户量级，代价可忽略）。
-    与 MemoryStore 的区别只有「落盘」——对外契约完全一致。
-    """
-
-    def __init__(self, path: Optional[str] = None) -> None:
-        self.path = path or _file_store_path()
-        self._tasks: dict = {}
-        self._msgs: dict = {}
-        self._load()
-
-    def _load(self) -> None:
-        if not os.path.isfile(self.path):
-            return
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._tasks = data.get("tasks") or {}
-            self._msgs = data.get("msgs") or {}
-        except Exception as e:  # noqa: BLE001
-            backup = f"{self.path}.corrupt-{int(time.time())}"
-            try:
-                os.replace(self.path, backup)
-                logger.error(f"本地 store 文件损坏，已备份到 {backup}，从空 store 重启: {e}")
-            except OSError:
-                logger.error(f"本地 store 文件损坏且备份失败: {e}")
-            self._tasks, self._msgs = {}, {}
-
-    def _flush(self) -> None:
-        """原子落盘：写 .tmp 后 os.replace，杜绝半截 JSON。"""
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = f"{self.path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                {"tasks": self._tasks, "msgs": self._msgs},
-                f, ensure_ascii=False,
-            )
-        os.replace(tmp, self.path)
-
-    def create_task(self, name: str) -> dict:
-        tid = str(uuid.uuid4())
-        now = time.time()
-        t = {
-            "id": tid,
-            "name": name,
-            "params": {},
-            "industry": None,
-            "turn": 0,
-            "created_at": now,
-            "updated_at": now,
-            "deleted_at": None,
-        }
-        self._tasks[tid] = t
-        self._msgs[tid] = []
-        self._flush()
-        return dict(t)
-
-    def list_tasks(self) -> List[dict]:
-        return [dict(t) for t in self._tasks.values() if t.get("deleted_at") is None]
-
-    def get_task(self, task_id: str) -> Optional[dict]:
-        t = self._tasks.get(task_id)
-        return dict(t) if t else None
-
-    def rename_task(self, task_id: str, name: str) -> None:
-        if task_id in self._tasks:
-            self._tasks[task_id]["name"] = name
-            self._tasks[task_id]["updated_at"] = time.time()
-            self._flush()
-
-    def update_params(self, task_id: str, params: dict) -> None:
-        if task_id in self._tasks:
-            self._tasks[task_id]["params"] = dict(params or {})
-            self._tasks[task_id]["updated_at"] = time.time()
-            self._flush()
-
-    def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
-        if task_id in self._msgs:
-            self._msgs[task_id].append(
-                {"role": role, "content": content, "turn": turn}
-            )
-            if len(self._msgs[task_id]) > _MAX_MESSAGES_PER_TASK:
-                self._msgs[task_id] = self._msgs[task_id][-_MAX_MESSAGES_PER_TASK:]
-            self._flush()
-
-    def get_messages(self, task_id: str) -> List[dict]:
-        return [dict(m) for m in self._msgs.get(task_id, [])]
-
-    def delete_task(self, task_id: str) -> None:
-        if task_id in self._tasks:
-            self._tasks[task_id]["deleted_at"] = time.time()
-            self._tasks[task_id]["updated_at"] = time.time()
-            self._msgs.pop(task_id, None)
-            self._flush()
-
-    def ping(self) -> None:
-        """可写性自检。构造后调用一次，确认路径真能落盘。"""
-        self._flush()
-
-    def close(self) -> None:
-        pass
-
-
 # ── 数据库连接配置 ────────────────────────────────────────────────────────
 _DEFAULT_DB_URL = "postgresql://newmacbook@localhost:5432/shangzhu"
 
 
-# ── 表结构（DDL 单源）────────────────────────────────────────────────────
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS tasks (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL DEFAULT '新任务',
-    params JSONB NOT NULL DEFAULT '{}',
-    industry TEXT,
-    turn INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id BIGSERIAL PRIMARY KEY,
-    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    turn INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
-"""
-
-
 def _db_url() -> str:
-    """获取业务库连接串，三级优先级：env var → config file → 内置默认。"""
-    env_url = os.getenv("PGDATABASE_URL")
-    if env_url and env_url.strip():
-        return env_url.strip()
-
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "config", "storage.json",
-    )
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        file_url = (cfg.get("db_url") or "").strip()
-        if file_url:
-            return file_url
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    return _DEFAULT_DB_URL
+    """获取业务库连接串（PGDATABASE_URL 优先，否则本机默认）。"""
+    return os.getenv("PGDATABASE_URL") or _DEFAULT_DB_URL
 
 
 def _row_to_task(row) -> dict:
@@ -393,145 +146,92 @@ def _row_to_task(row) -> dict:
 
 
 class PostgresStore(BaseStore):
-    """psycopg3 实现，落盘本机 PostgreSQL（持久化首选）。
+    """psycopg3 实现，落盘本机 PostgreSQL。
 
-    使用单连接 + autocommit（本地单用户够用，不做连接池）。相比早期版本有三处加固：
-
-    1. **懒连接**：`__init__` 只存 URL，不建连接——避免「服务启动顺序」与
-       「PG 临时不可达」互相纠缠，也让 `get_store()` 能靠 `ping()` 真正验证可用性。
-    2. **断线自愈**：每次 SQL 经 `_execute`，遇到 OperationalError / InterfaceError
-       自动重建连接重试一次。PG 重启后下一个请求即恢复，不必重启工作台。
-    3. **幂等建表**：首次连上时执行 `SCHEMA_SQL`（CREATE IF NOT EXISTS），
-       消除「忘了跑 scripts/init_db.py 就静默没表」的失败模式。
+    使用单连接 + autocommit（本地单用户够用，不做连接池）。
     """
 
     def __init__(self, url: Optional[str] = None) -> None:
-        import psycopg  # 延迟导入：仅真正使用 Postgres 时才需要该驱动
-
-        self._psycopg = psycopg
         self.url = url or _db_url()
-        self._conn = None
-        self._schema_ready = False
-
-    def _connect(self) -> None:
-        self._conn = self._psycopg.connect(self.url, autocommit=True)
-        if not self._schema_ready:
-            with self._conn.cursor() as cur:
-                cur.execute(SCHEMA_SQL)
-            self._schema_ready = True
-
-    def _drop_conn(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
-
-    def _execute(self, fn):
-        """执行一段以 cursor 为参数的 SQL；连接失效时重连后重试一次。"""
-        last_err: Optional[Exception] = None
-        for attempt in (0, 1):
-            try:
-                if self._conn is None or self._conn.closed:
-                    self._connect()
-                with self._conn.cursor() as cur:
-                    return fn(cur)
-            except (self._psycopg.OperationalError,
-                    self._psycopg.InterfaceError) as e:
-                last_err = e
-                self._drop_conn()
-                if attempt == 0:
-                    logger.warning(f"PG 连接失效，重连重试: {e}")
-        raise last_err  # type: ignore[misc]
-
-    def ping(self) -> None:
-        """连通性自检（含幂等建表）。构造后调用一次，确认后端真能用。"""
-        self._execute(lambda cur: cur.execute("SELECT 1"))
+        self._conn = psycopg.connect(self.url, autocommit=True)
 
     def create_task(self, name: str) -> dict:
         tid = str(uuid.uuid4())
-
-        def _run(cur):
+        with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO tasks (id, name) VALUES (%s, %s) "
-                "RETURNING created_at, updated_at",
+                "INSERT INTO tasks (id, name) VALUES (%s, %s) RETURNING id, name",
                 (tid, name),
             )
-            return cur.fetchone()
-
-        row = self._execute(_run)
         return {
             "id": tid,
             "name": name,
             "params": {},
             "industry": None,
             "turn": 0,
-            "created_at": row[0] if row else None,
-            "updated_at": row[1] if row else None,
+            "created_at": None,
+            "updated_at": None,
             "deleted_at": None,
         }
 
     def list_tasks(self) -> List[dict]:
-        def _run(cur):
+        with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT id, name, params, industry, turn, created_at, updated_at, deleted_at "
                 "FROM tasks WHERE deleted_at IS NULL ORDER BY updated_at DESC"
             )
-            return cur.fetchall()
-
-        return [_row_to_task(r) for r in self._execute(_run)]
+            rows = cur.fetchall()
+        return [_row_to_task(r) for r in rows]
 
     def get_task(self, task_id: str) -> Optional[dict]:
-        def _run(cur):
+        with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT id, name, params, industry, turn, created_at, updated_at, deleted_at "
                 "FROM tasks WHERE id = %s",
                 (task_id,),
             )
-            return cur.fetchone()
-
-        row = self._execute(_run)
+            row = cur.fetchone()
         return _row_to_task(row) if row else None
 
     def rename_task(self, task_id: str, name: str) -> None:
-        self._execute(lambda cur: cur.execute(
-            "UPDATE tasks SET name = %s, updated_at = now() WHERE id = %s",
-            (name, task_id),
-        ))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET name = %s, updated_at = now() WHERE id = %s",
+                (name, task_id),
+            )
 
     def update_params(self, task_id: str, params: dict) -> None:
-        self._execute(lambda cur: cur.execute(
-            "UPDATE tasks SET params = %s, updated_at = now() WHERE id = %s",
-            (json.dumps(params or {}), task_id),
-        ))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET params = %s, updated_at = now() WHERE id = %s",
+                (json.dumps(params or {}), task_id),
+            )
 
     def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
-        self._execute(lambda cur: cur.execute(
-            "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, %s, %s, %s)",
-            (task_id, role, content, turn),
-        ))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, %s, %s, %s)",
+                (task_id, role, content, turn),
+            )
 
     def get_messages(self, task_id: str) -> List[dict]:
-        def _run(cur):
+        with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT role, content, turn FROM messages "
                 "WHERE task_id = %s ORDER BY id",
                 (task_id,),
             )
-            return cur.fetchall()
-
-        return [{"role": r[0], "content": r[1], "turn": r[2]}
-                for r in self._execute(_run)]
+            rows = cur.fetchall()
+        return [{"role": r[0], "content": r[1], "turn": r[2]} for r in rows]
 
     def delete_task(self, task_id: str) -> None:
-        self._execute(lambda cur: cur.execute(
-            "UPDATE tasks SET deleted_at = now(), updated_at = now() WHERE id = %s",
-            (task_id,),
-        ))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET deleted_at = now(), updated_at = now() WHERE id = %s",
+                (task_id,),
+            )
 
     def close(self) -> None:
-        self._drop_conn()
+        self._conn.close()
 
 
 # ── store 工厂 ────────────────────────────────────────────────────────────
@@ -539,39 +239,18 @@ _store: Optional[BaseStore] = None
 
 
 def get_store() -> BaseStore:
-    """全局单例 store：PG → 本地 JSON 文件 → 内存（最后一档才丢数据）。
+    """全局单例 store：优先 PG，连不上/未配置时降级内存。
 
-    **降级必有痕**：每一档降级都经 `web.local_store` logger 打 WARNING/ERROR，
-    继承 web_server 的控制台 + `logs/web_server.log` 双通道，排查时能直接查到原因。
+    降级日志打一次，避免刷屏；重试逻辑由上层决定（如 web_server 启动时探测）。
     """
     global _store
     if _store is not None:
         return _store
-
-    # 1) PostgreSQL：持久化首选
-    candidate: Optional[BaseStore] = None
     try:
-        pg = PostgresStore()
-        pg.ping()
-        candidate = pg
+        _store = PostgresStore()
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"PostgreSQL 不可用（{e}），降级本地文件 store")
-        if candidate is not None:
-            candidate.close()
-
-    # 2) 本地 JSON 文件：PG 不在也不丢数据
-    if candidate is None:
-        try:
-            fs = LocalFileStore()
-            fs.ping()
-            candidate = fs
-            logger.warning(f"已降级本地文件 store：{fs.path}（重启不丢，但非多端共享）")
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"本地文件 store 也不可用（{e}），降级内存 store：数据重启即丢！")
-
-    # 3) 内存兜底：最后一道，明确标注会丢
-    _store = candidate if candidate is not None else MemoryStore()
-    logger.info(f"存储后端就绪: {type(_store).__name__}")
+        logging.getLogger(__name__).warning(f"PG 不可用，降级内存 store: {e}")
+        _store = MemoryStore()
     return _store
 
 

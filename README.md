@@ -68,22 +68,7 @@ make start     # 等价 ./start.sh -p 8000
 
 ## 配置
 - 模型：`deepseek-v4-flash`（**单源**：`config/agent_llm_config.json` 的 `config.model`）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。
-- 数据库：默认 `postgresql://newmacbook@localhost:5432/shangzhu`。可通过以下方式覆盖：
-  - 环境变量 `PGDATABASE_URL`（最高优先级）
-  - `config/storage.json` 中的 `db_url` 字段（中等优先级，文件被 gitignore）
-  - `config/storage.json.example` 为模板文件，复制为 `storage.json` 后修改即可
-- 存储降级链：PG → 本地 JSON 文件 → 内存。前两级重启不丢，最后一级仅作兜底。
-
-## 安全
-- **API Key 管理**：四级优先级读取：
-  1. 环境变量 `DEEPSEEK_API_KEY` / `LONGCAT_API_KEY` / `LLM_API_KEY`
-  2. macOS Keychain（service=`shangzhu-llm`, account=`api_key`）
-  3. `config/agent_llm_config.json`（明文回退，会打 WARNING）
-  4. 空串（未配置）
-- 建议运行 `.venv/bin/python scripts/migrate_key_to_keyring.py` 将现有明文 key 迁移到 Keychain。
-- **CORS**：白名单限制为 `http://127.0.0.1:8080` 和 `http://localhost:8080`，POST 类操作要求 `X-Requested-With` 头防 CSRF。
-- **配置文件权限**：`config/storage.json` 和 `config/agent_llm_config.json` 均为 `600`，不会被 git 跟踪。
-- **备份**：定期执行 `./scripts/backup_db.sh shangzhu` 备份数据库，备份文件在 `backups/` 目录，自动保留最近 7 份。
+- 密钥：设置环境变量 `DEEPSEEK_API_KEY`（无 `.env` 文件，由运行环境注入）。缺失时 LLM 解读层（Engine Steward）静默跳过，规则引擎照常工作。
 
 ## 测试（仅覆盖 A：本地引擎层）
 

@@ -22,7 +22,6 @@ const ccValue = document.getElementById('cc-value');
 const ccRun = compareControls.querySelector('.cc-run');
 const exportPdf = document.getElementById('export-pdf');
 const exportExcel = document.getElementById('export-excel');
-const modelNameEl = document.getElementById('model-name');
 
 // ── 分类系统状态 ──
 const CATS = ['all', 'analyze', 'params', 'decide', 'compare'];
@@ -56,86 +55,9 @@ let tasksCache = {};  // id → task（含 params，切任务时恢复参数状�
 let activeCtrl = null;  // 在飞的请求控制器：切任务时 abort，避免响应错配与输入框长锁
 
 // ── 健康检查 ──
-function applyModelName(name) {
-  const n = name || '已连接';
-  status.textContent = n;
-  status.style.color = '#4ade80';
-  if (modelNameEl) modelNameEl.textContent = '· ' + n;
-}
 fetch('/health').then(r => r.json()).then(d => {
-  applyModelName(d.model);
+  status.textContent = d.model || '已连接'; status.style.color = '#4ade80';
 }).catch(() => { status.textContent = '连接失败'; status.style.color = '#f87171'; });
-
-// ── 模型设置弹窗（点击右上角模型名打开）──
-function testLlmConfig(body) {
-  // 保存后自动连通性探测，body.api_key 可能为空（留空=不修改）
-  fetch('/settings/llm/test', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-    body: JSON.stringify(body)
-  })
-  .then(r => r.json()).then(d => {
-    if (d.ok) {
-      setToast('✅ 已保存且连通性测试通过（' + d.latency_ms + 'ms）', '#059669');
-    } else {
-      const err = d.error || '未知错误';
-      setToast('⚠️ 已保存，但连通性测试未通过：' + err, '#d97706');
-    }
-  })
-  .catch(() => setToast('⚠️ 已保存，但连通性测试请求失败', '#d97706'));
-}
-
-function openModelSettings() {
-  fetch('/settings/llm').then(r => r.json()).then(cfg => {
-    let overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML =
-      '<div class="modal-box">' +
-        '<div class="modal-title">大模型设置</div>' +
-        '<label class="modal-label">模型名称</label>' +
-        '<input class="modal-input" id="ms-model" placeholder="如 deepseek-v4-flash">' +
-        '<label class="modal-label">接口 URL</label>' +
-        '<input class="modal-input" id="ms-url" placeholder="如 https://api.deepseek.com/v1">' +
-        '<label class="modal-label">API Key（当前已配置，留空则保持不变）</label>' +
-        '<input class="modal-input" id="ms-key" type="password" placeholder="sk-... 或 ak-... 格式，至少 8 位">' +
-        '<div class="modal-actions">' +
-          '<button class="modal-btn cancel" id="ms-cancel">取消</button>' +
-          '<button class="modal-btn save" id="ms-save">保存</button>' +
-        '</div>' +
-      '</div>';
-    document.body.appendChild(overlay);
-
-    const m = overlay.querySelector('#ms-model');
-    const u = overlay.querySelector('#ms-url');
-    const k = overlay.querySelector('#ms-key');
-    m.value = cfg.model || '';
-    u.value = cfg.base_url || '';
-
-    const close = () => overlay.remove();
-    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
-    overlay.querySelector('#ms-cancel').addEventListener('click', close);
-    overlay.querySelector('#ms-save').addEventListener('click', () => {
-      const body = { model: m.value.trim(), base_url: u.value.trim(), api_key: k.value.trim() };
-      if (!body.model) { setToast('⚠️ 模型名称不能为空', '#d97706'); return; }
-      if (body.api_key && body.api_key.length < 8) { setToast('⚠️ API Key 过短（至少 8 位），请检查是否输入完整', '#d97706'); return; }
-      fetch('/settings/llm', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) })
-        .then(r => r.json()).then(d => {
-          if (d.ok !== undefined && d.ok === false) { setToast('⚠️ 保存失败', '#d97706'); return; }
-          if (d.error) { setToast('⚠️ ' + d.error, '#d97706'); return; }
-          applyModelName(d.model);
-          setToast('✅ 已保存：' + d.model, '#059669');
-          close();
-          // 保存后自动连通性探测
-          testLlmConfig(body);
-        })
-        .catch(() => setToast('⚠️ 保存请求失败', '#d97706'));
-    });
-    m.focus();
-  }).catch(() => setToast('⚠️ 读取配置失败', '#d97706'));
-}
-status.addEventListener('click', openModelSettings);
-const settingsBtn = document.getElementById('settings-btn');
-if (settingsBtn) settingsBtn.addEventListener('click', openModelSettings);
 
 // ── 任务管理 ──
 async function loadTasks() {
@@ -192,7 +114,7 @@ function clearChat() {
 
 async function newTask() {
   currentTaskId = null; let ok = false;
-  try { const r = await fetch('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ name: '新任务' }) }); const t = await r.json(); currentTaskId = t.id; ok = true; } catch (e) { currentTaskId = null; }
+  try { const r = await fetch('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '新任务' }) }); const t = await r.json(); currentTaskId = t.id; ok = true; } catch (e) { currentTaskId = null; }
   if (!ok) { setToast('⚠️ 新建任务失败，请重试', '#d97706'); }
   clearChat(); activeTaskUi(); loadTasks(); input.focus();
 }
@@ -744,7 +666,7 @@ function applyAdvisorAction(idx) {
   const op = _advisorData.actions[idx].op;
   if (!op) return;
   fetch('/advisor/apply?tid=' + currentTaskId, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ op: op }),
   }).then(r => r.json()).then(d => {
     if (d.ok && d.applied) {
@@ -908,7 +830,7 @@ async function send() {
   try {
     const body = { messages: [{ role: 'user', content: text }] };
     if (currentTaskId) body.task_id = currentTaskId;
-    const resp = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body), signal: ctrl.signal });
+    const resp = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctrl.signal });
     if (!resp.ok) {
       const err = await resp.text();
       if (sentTaskId !== currentTaskId) { placeholder.remove(); return; }  // 已切任务，丢弃

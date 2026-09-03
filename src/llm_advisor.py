@@ -122,21 +122,37 @@ def _resolve_llm_config_path() -> str:
 
 LLM_CONFIG_PATH = _resolve_llm_config_path()
 
-_SYSTEM = """你是「创业者商业建模工作台」的 Engine Steward——冷静的合伙人，不是闲聊机器人。
+_SYSTEM = """你是「创业者商业建模工作台」的**交互主持人**——用户的私人创业分析顾问。
 
-你的核心角色是**翻译 + 编排**：
-1) 翻译：把引擎结构化输出翻成人话——盈亏、跑道、最该核实的杠杆点。
-2) 追问：识别用户模糊意图（"我能不能成""能扛多久"）时，问一个最该澄清的问题，而不是套降级模板。
-3) 类比与画面：把数字翻译成躯体感（"半年从家里拿一次钱"），让用户能决策。
-4) 编排：用户给模糊目标（"怎么收支平衡""减租好还是提价好"）时，输出候选方案清单，引擎算、你只选。
+你的核心角色是**翻译 + 追问 + 推荐**：
+### 1. 翻译（把数字变成决策）
+- 把引擎输出的结构化数据（月利润、跑道、盈亏平衡点）翻译成用户能理解的语言
+- 不只是报数字，还要解释**为什么重要**："月利润 5000，跑道 5 个月偏紧——一般建议至少 6 个月缓冲"
+- 把数字翻译成画面感："每月落袋 5000，够覆盖..."
 
-铁律（不可破）：
+### 2. 追问（引导用户补参数）
+- 缺核心参数时，追问 1-2 个最关键的（月租、客流、客单价、员工数）
+- 每轮追问都给"先用默认值算一下"选项："月租多少？没概念的话先用 8000 算一下"
+- 追问有明确目标，不是漫无目的
+
+### 3. 推荐（从引擎给的动作列表里选）
+- 参数充足时，推荐下一步最该看的分析（从引擎提供的 available_actions 里选）
+- 每轮最多推荐一个动作，结尾问"要不要看看？"
+- 连续两轮推荐后，第三轮起不再推荐，等用户指令
+
+### 4. 对比（仅在用户明确提及时）
+- 对比是重型工具，不主动提
+- 用户提到"对比/比较/vs"时才推荐
+
+## 铁律（不可破）
 - 你看到的「结构化分析结果 + 当前会话状态 + 本轮变更」即唯一真相。绝不声称引擎错了、绝不与历史原文对账。
-- 任何面向用户的数字必须来自结构化输出，绝不在体内做算术。
+- **任何面向用户的数字必须来自结构化输出，绝不在体内做算术**
+- **绝不评价参数好坏**："月租 1 万偏高" ❌ → "月租 1 万占成本 40%，比行业平均高 5 个百分点" ✅
+- **绝不替用户做决定**："我建议你提价" ❌ → "要不要看看提价的影响？" ✅
 - 绝不修改派生字段（monthly_labor / monthly_fixed_cost / monthly_profit 等靠引擎重算，不让人改）。
-- 建议改参数时，只指向「基础字段」（avg_salary / employee_count / monthly_rent / price_per_unit / daily_traffic / variable_cost_ratio / total_investment 等）。
+- **绝不自行分析趋势/做推断**：所有分析是引擎的事
 
-编排能力（Tier 1，受代码校验后由用户确认）：
+## 编排能力（Tier 1，受代码校验后由用户确认）
 - 用户给模糊目标时，在回复末尾输出 ```ops 块，给骨架只给方向不给死值：
 
   ```ops
@@ -368,12 +384,13 @@ def _get_llm() -> ChatOpenAI:
     return _llm_cache
 
 
-def advise(scan: dict, user_text: str = "", session_snapshot: dict = None) -> dict:
-    """基于结构化输出生成 LLM 解读（引擎管理者 / Engine Steward）。
+def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, context: dict = None) -> dict:
+    """基于结构化输出生成 LLM 解读（交互主持人模式）。
 
-    返回 {"text": 解读文本, "ops": [op...]}：
-    - text：自然语言解读（含追问/类比/翻译）
+    返回 {"text": 解读文本, "ops": [op...], "meta": {asked_question, made_recommendation, suggested_comparison}}：
+    - text：自然语言解读（含追问/类比/翻译/推荐）
     - ops：若 LLM 输出了 ```ops 块则解析出的编排提议，由 web_server 渲染为确认流
+    - meta：告诉引擎侧 LLM 做了什么（用于更新计数器）
 
     护栏（C3 红线，执行机制而非口号）：
     - 入参 scan / session_snapshot 一律先做 `copy.deepcopy` 只读副本，函数体
@@ -448,10 +465,59 @@ def advise(scan: dict, user_text: str = "", session_snapshot: dict = None) -> di
             f"【结构化分析结果】\n{brief}\n\n"
             "请基于以上给出解读与建议。若有需要编排的候选方案，按系统提示词输出 ```ops 块。"
         )
+    # 主持人模式：根据 context 调整策略
+    meta = {"asked_question": False, "made_recommendation": False, "suggested_comparison": False}
+    context = context or {}
+    available_actions = context.get("available_actions", [])
+    recommendation_count = context.get("recommendation_count", 0)
+    comparison_count = context.get("comparison_count", 0)
+    missing_params = context.get("missing_params", [])
+    has_default = context.get("has_default", {})
+
+    # 构建主持人策略提示
+    strategy_hints = []
+    if missing_params and recommendation_count < 2:
+        # 有缺失参数且推荐次数未满 -> 追问 1-2 个核心参数
+        priority_params = [p for p in missing_params if p in ("monthly_rent", "daily_traffic", "price_per_unit", "employee_count", "avg_salary")]
+        if not priority_params:
+            priority_params = missing_params[:2]
+        defaults_hint = ""
+        for p in priority_params:
+            if p in has_default:
+                defaults_hint += f"- {p} 的默认值为 {has_default[p]}\n"
+        strategy_hints.append(
+            f"【追问】还缺以下核心参数：{', '.join(priority_params)}。"
+            f"请追问这些参数（最多问 1-2 个），并告诉用户可以用默认值先算一下。\n"
+            f"{defaults_hint}"
+            f"示例：\"月租大概多少？没概念的话先用 8000 算一下。\""
+        )
+        meta["asked_question"] = True
+    elif recommendation_count < 2 and available_actions:
+        # 参数充足且推荐次数未满 -> 推荐一个动作
+        # 对比动作需要用户明确提到才推荐
+        non_compare_actions = [a for a in available_actions if a != "compare_scenarios"]
+        if non_compare_actions:
+            strategy_hints.append(
+                f"【推荐】参数已充足。下一步最该看的是：{non_compare_actions[0]}。"
+                f"结尾问\"要不要看看？\"，不要强推。"
+            )
+            meta["made_recommendation"] = True
+        elif comparison_count == 0 and "compare_scenarios" in available_actions:
+            strategy_hints.append(
+                "【对比】参数已充足。仅在用户明确提到\"对比/比较/vs\"时才推荐对比。否则不主动提。"
+            )
+    else:
+        strategy_hints.append("【静默】不要推荐新动作，直接等用户指令。结尾说\"有什么想了解的直接说\"。")
+
+    # 绝不分析的硬约束
+    strategy_hints.append("【禁止分析】所有数字必须来自引擎输出。禁止自行做算术、推断趋势、评价参数好坏。只翻译数字含义和解释影响。")
+
+    strategy_block = "\n\n".join(strategy_hints)
+
     try:
         resp = _get_llm().invoke([
             SystemMessage(content=system),
-            HumanMessage(content=user_prompt),
+            HumanMessage(content=strategy_block + "\n\n" + user_prompt),
         ])
         raw_text = resp.content if isinstance(resp.content, str) else str(resp.content)
         raw_text = raw_text.strip()
@@ -459,11 +525,11 @@ def advise(scan: dict, user_text: str = "", session_snapshot: dict = None) -> di
         # 从解读里剥除 ops 代码块（人不看 JSON）
         if ops:
             clean_text = _strip_ops_blocks(raw_text)
-            return {"text": clean_text.strip(), "ops": ops}
-        return {"text": raw_text, "ops": []}
+            return {"text": clean_text.strip(), "ops": ops, "meta": meta}
+        return {"text": raw_text, "ops": [], "meta": meta}
     except Exception as e:  # noqa
         logger.warning(f"LLM 解读失败，跳过: {e}")
-        return {"text": "", "ops": []}
+        return {"text": "", "ops": [], "meta": meta}
 
 
 # ── ops 解析（```ops ... ```）─────────────────────────────────────────────

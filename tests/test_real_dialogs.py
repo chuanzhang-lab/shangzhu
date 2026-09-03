@@ -25,7 +25,7 @@ from op_executor import (
 from tools.workflow_engine import quick_scan
 
 # 桩 LLM 让它在不同问句下「装作在对话/编排」——通过 user_text 关键选择回复
-def _stub_advise(scan, user_text="", session_snapshot=None):
+def _stub_advise(scan, user_text="", session_snapshot=None, context=None):
     text = user_text or ""
     if "怎么扭亏" in text or "怎么不亏" in text:
         # 模糊目标 → LLM 应该输出 ops 块

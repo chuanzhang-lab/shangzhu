@@ -19,7 +19,7 @@ os.chdir(_saved)
 from fastapi.testclient import TestClient
 
 # 桩掉 LLM 调用（不真实联网），专注 HTTP/路由/解析层
-ws.llm_advise = lambda scan, user_text="", session_snapshot=None: {"text": "", "ops": []}
+ws.llm_advise = lambda scan, user_text="", session_snapshot=None, context=None: {"text": "", "ops": []}
 _client = TestClient(ws.app)
 _XHR = {"X-Requested-With": "XMLHttpRequest"}
 
