@@ -297,7 +297,6 @@ def _build_advise_context(tid: str, scan: dict) -> dict:
     return {
         "available_actions": available_actions,
         "recommendation_count": meta.get("recommendation_count", 0),
-        "comparison_count": meta.get("comparison_count", 0),
         "question_count": meta.get("question_count", 0),
         "missing_params": missing_params,
         "has_default": has_default,
@@ -307,13 +306,11 @@ def _build_advise_context(tid: str, scan: dict) -> dict:
 
 
 def _reset_advise_meta(tid: str):
-    """新一轮对话（用户切换话题或新建任务）时重置计数器。"""
+    """追问打断「连续推荐」时，清零推荐计数（重新给推荐机会）。"""
     st = get_state(tid)
     if "_advise_meta" not in st:
         st["_advise_meta"] = {}
     st["_advise_meta"]["recommendation_count"] = 0
-    st["_advise_meta"]["comparison_count"] = 0
-    st["_advise_meta"]["question_count"] = 0
 
 
 def _incr_advise_meta(tid: str, field: str):
@@ -1122,9 +1119,9 @@ async def chat(req: ChatRequest):
                         m = advice["meta"]
                         if m.get("made_recommendation"):
                             _incr_advise_meta(tid, "recommendation_count")
-                        if m.get("suggested_comparison"):
-                            _incr_advise_meta(tid, "comparison_count")
                         if m.get("asked_question"):
+                            # 追问打断「连续推荐」：清零推荐计数，重新给推荐机会
+                            _reset_advise_meta(tid)
                             _incr_advise_meta(tid, "question_count")
                     # L2 决策（D5）：LLM 解读禁止「建议你/你应该/必须…」倾向词。
                     # 命中任何倾向词 → 丢弃整段 LLM 解读，规则层客观结构独自成立。

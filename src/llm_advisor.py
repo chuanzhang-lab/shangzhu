@@ -140,10 +140,6 @@ _SYSTEM = """你是「创业者商业建模工作台」的**交互主持人**—
 - 每轮最多推荐一个动作，结尾问"要不要看看？"
 - 连续两轮推荐后，第三轮起不再推荐，等用户指令
 
-### 4. 对比（仅在用户明确提及时）
-- 对比是重型工具，不主动提
-- 用户提到"对比/比较/vs"时才推荐
-
 ## 铁律（不可破）
 - 你看到的「结构化分析结果 + 当前会话状态 + 本轮变更」即唯一真相。绝不声称引擎错了、绝不与历史原文对账。
 - **任何面向用户的数字必须来自结构化输出，绝不在体内做算术**
@@ -399,7 +395,7 @@ def _get_llm() -> ChatOpenAI:
 def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, context: dict = None) -> dict:
     """基于结构化输出生成 LLM 解读（交互主持人模式）。
 
-    返回 {"text": 解读文本, "ops": [op...], "meta": {asked_question, made_recommendation, suggested_comparison}}：
+    返回 {"text": 解读文本, "ops": [op...], "meta": {asked_question, made_recommendation}}：
     - text：自然语言解读（含追问/类比/翻译/推荐）
     - ops：若 LLM 输出了 ```ops 块则解析出的编排提议，由 web_server 渲染为确认流
     - meta：告诉引擎侧 LLM 做了什么（用于更新计数器）
@@ -478,19 +474,21 @@ def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, conte
             "请基于以上给出解读与建议。若有需要编排的候选方案，按系统提示词输出 ```ops 块。"
         )
     # 主持人模式：根据 context 调整策略
-    meta = {"asked_question": False, "made_recommendation": False, "suggested_comparison": False}
+    meta = {"asked_question": False, "made_recommendation": False}
     context = context or {}
     available_actions = context.get("available_actions", [])
     recommendation_count = context.get("recommendation_count", 0)
-    comparison_count = context.get("comparison_count", 0)
     missing_params = context.get("missing_params", [])
     has_default = context.get("has_default", {})
 
     # 构建主持人策略提示
     strategy_hints = []
-    if missing_params and recommendation_count < 2:
-        # 有缺失参数且推荐次数未满 -> 追问 1-2 个核心参数
-        priority_params = [p for p in missing_params if p in ("monthly_rent", "daily_traffic", "price_per_unit", "employee_count", "avg_salary")]
+    if missing_params:
+        # 有缺失参数 -> 追问 1-2 个核心参数（补参永远优先，不受推荐计数限制）
+        priority_params = [p for p in missing_params if p in (
+            "monthly_rent", "daily_traffic", "price_per_unit",
+            "employee_count", "avg_salary", "total_investment", "variable_cost_ratio",
+        )]
         if not priority_params:
             priority_params = missing_params[:2]
         defaults_hint = ""
@@ -506,18 +504,14 @@ def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, conte
         meta["asked_question"] = True
     elif recommendation_count < 2 and available_actions:
         # 参数充足且推荐次数未满 -> 推荐一个动作
-        # 对比动作需要用户明确提到才推荐
-        non_compare_actions = [a for a in available_actions if a != "compare_scenarios"]
-        if non_compare_actions:
-            strategy_hints.append(
-                f"【推荐】参数已充足。下一步最该看的是：{non_compare_actions[0]}。"
-                f"结尾问\"要不要看看？\"，不要强推。"
-            )
-            meta["made_recommendation"] = True
-        elif comparison_count == 0 and "compare_scenarios" in available_actions:
-            strategy_hints.append(
-                "【对比】参数已充足。仅在用户明确提到\"对比/比较/vs\"时才推荐对比。否则不主动提。"
-            )
+        # 排除「重新扫描(quick_scan)」与「对比(compare_scenarios)」，取第一个真正的下一步分析
+        actionable = [a for a in available_actions if a not in ("quick_scan", "compare_scenarios")]
+        pick = actionable[0] if actionable else "quick_scan"
+        strategy_hints.append(
+            f"【推荐】参数已充足。下一步最该看的是：{pick}。"
+            f"结尾问\"要不要看看？\"，不要强推。"
+        )
+        meta["made_recommendation"] = True
     else:
         strategy_hints.append("【静默】不要推荐新动作，直接等用户指令。结尾说\"有什么想了解的直接说\"。")
 
