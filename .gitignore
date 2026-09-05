@@ -80,3 +80,7 @@ web_server.log
 *.log
 logs/
 reports/
+
+# 遗留备份文件不入库
+*.bak*
+web_server.py.bak_m3

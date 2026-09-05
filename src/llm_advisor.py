@@ -238,7 +238,7 @@ def get_base_url() -> str:
 
 
 def has_api_key() -> bool:
-    """是否已配置 DEEPSEEK_API_KEY（供 /health 可观测性）。"""
+    """是否已配置 API Key（四级优先级：config 单源 → 环境变量 → Keychain → 空；供 /health 可观测性）。"""
     return bool(_api_key())
 
 

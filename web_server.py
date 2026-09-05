@@ -498,8 +498,11 @@ def _route_intent(intent: str, merged_params: dict, user_text: str) -> Optional[
 # ─── Pydantic 模型 ─────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
     role: str
-    # 安全审查 S7：单条消息长度上限（防超长输入拖爆解析/存储）
-    content: str = Field(max_length=50000)
+    # 安全审查 S7：单条消息长度上限（防超长输入拖爆解析/存储）。
+    # C1 修复：pydantic 层上限仅作 DoS 硬防线（远大于业务限制），
+    # 10000 的规格限制仍由业务层 _MAX_INPUT_LENGTH 统一拦截返回 400，
+    # 避免双轨矛盾与 422/400 语义冲突
+    content: str = Field(max_length=100000)
 
 
 class ChatRequest(BaseModel):

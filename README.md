@@ -67,7 +67,7 @@ make start     # 等价 ./start.sh -p 8000
 - **交互状态可观测（F5）**：导出前校验参数完整性（缺营收/变动成本/固定成本则提示并拦截）；新建任务失败给红字反馈；任务改名带成功/失败 toast。
 
 ## 配置
-- 模型：`deepseek-v4-flash`（**单源**：`config/agent_llm_config.json` 的 `config.model`）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。
+- 模型：`mimo-v2.5-pro`（**单源**：`config/agent_llm_config.json` 的 `config.model`；代码 fallback 为 `deepseek-v4-flash`）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。
 - 数据库：默认 `postgresql://newmacbook@localhost:5432/shangzhu`。可通过以下方式覆盖：
   - 环境变量 `PGDATABASE_URL`（最高优先级）
   - `config/storage.json` 中的 `db_url` 字段（中等优先级，文件被 gitignore）
@@ -90,7 +90,7 @@ make start     # 等价 ./start.sh -p 8000
 ```bash
 .venv/bin/python3 tests/run_all.py
 ```
-- 测试只覆盖**本地引擎层 (A)**：`router`(参数抽取/意图) → `session_state`(跨轮 merge) → `workflow_engine`(quick_scan) → `financial_calculator` → `formatter` → `llm_advisor`(Engine Steward) 全链路，以及 12 轮羊肉汤店对话集成 oracle。另含本地存储层（`test_local_store`）与任务 CRUD API（`test_task_api`）。当前全量 **285 用例**（含 2026-08-19 新增的 trend 统一降级与 None 防御回归、2026-08-21 资源泄漏修复回归、2026-08-28 顾问面板与前端交互修复回归）。
+- 测试只覆盖**本地引擎层 (A)**：`router`(参数抽取/意图) → `session_state`(跨轮 merge) → `workflow_engine`(quick_scan) → `financial_calculator` → `formatter` → `llm_advisor`(Engine Steward) 全链路，以及 12 轮羊肉汤店对话集成 oracle。另含本地存储层（`test_local_store`）与任务 CRUD API（`test_task_api`）。当前全量 **270 用例**（含 2026-08-19 新增的 trend 统一降级与 None 防御回归、2026-08-21 资源泄漏修复回归、2026-08-28 顾问面板与前端交互修复回归、2026-09-05 并发/安全/资源生命周期修复回归）。
 - **不覆盖 (B) Coze 路径**：该路径已从本仓移除；解耦由 `tests/test_phase4_workbench.py` 的 `test_p48_*` 硬性守护（断言 `web_server.py` 不得 import `agents.agent` / `build_agent` / `get_agent`）。
 
 ## 依赖分组（clone 后注意）
