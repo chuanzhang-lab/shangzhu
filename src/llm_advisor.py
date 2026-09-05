@@ -389,7 +389,13 @@ def _get_llm() -> ChatOpenAI:
             )
             client._shangzhu_sig = cache_sig  # type: ignore[attr-defined]
             _llm_cache = client
-    return _llm_cache
+        return _llm_cache  # 审查修复 F5：return 入锁，避免锁外读到半初始化状态
+
+def invalidate_llm_cache() -> None:
+    """锁内显式失效 LLM client 缓存（配置保存后调用，修复 F7 窗口）。"""
+    global _llm_cache
+    with _llm_cache_lock:
+        _llm_cache = None
 
 
 def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, context: dict = None) -> dict:
@@ -583,7 +589,17 @@ def _mask_key(key: str) -> str:
 
 
 def get_llm_config_view() -> dict:
-    """给 /settings/llm 的脱敏配置视图：只回显掩码，绝不暴露完整 key。"""
+    """给 /settings/llm 的脱敏配置视图：只回显掩码，绝不暴露完整 key。
+
+    审查修复 F6：与 config.settings 双实现并存时返回结构不一致（此处平铺、
+    settings 包裹 config 键），且互不感知锁。现统一委托 config.settings
+    （它有 _CONFIG_LOCK 保护的读-改-写），本函数仅作兼容入口保留。
+    """
+    try:
+        from config.settings import get_llm_config_view as _settings_view
+        return _settings_view()
+    except Exception:
+        pass  # 委托失败（极端：config 包不可导入）时退回本地读
     cfg = _load_llm_config().get("config", {})
     return {
         "model": cfg.get("model", "deepseek-v4-flash"),
@@ -602,8 +618,24 @@ def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
     - 保留 config 里其它字段（temperature/top_p/...）与顶层 sp/tools
 
     返回写入后的配置视图。
+
+    审查修复 F6：主路径已统一走 config.settings.save_llm_config（web_server
+    导入），为避免两套实现各持各的锁互不互斥，本函数委托 settings 实现，
+    外层 _config_write_lock 保留作兼容（同一进程内先入 settings 锁再入此锁，
+    顺序固定不会死锁）。
     """
     global _llm_cache
+    try:
+        from config.settings import save_llm_config as _settings_save
+        view = _settings_save(model, base_url, api_key)
+        # settings 写成功后同步失效 LLM client 缓存（修复 F7：缩短旧配置残留窗口）
+        with _llm_cache_lock:
+            _llm_cache = None
+        return view
+    except ValueError:
+        raise  # 参数校验错误原样抛
+    except Exception:
+        pass  # 委托失败退回本地实现
     with _config_write_lock:
         key_raw = (api_key or "").strip()
         if key_raw and len(key_raw) < 8:
@@ -660,6 +692,36 @@ def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
     return get_llm_config_view()
 
 
+def _validate_llm_url(base_url: str) -> Optional[str]:
+    """安全审查 S6 修复：校验探测目标 URL，阻断 SSRF 内网探测。
+
+    规则：仅允许 https；禁止指向内网/回环/链路本地/私有地址段。
+    返回 None 表示通过，否则返回拒绝原因。
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+
+    u = urlparse((base_url or "").strip())
+    if u.scheme != "https":
+        return f"仅允许 https 协议（当前: {u.scheme or '无'}）"
+    host = u.hostname or ""
+    if not host:
+        return "URL 缺少主机名"
+    # 回环/内网字面量
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return f"禁止探测内网/保留地址: {host}"
+        return None  # 公网 IP 直接放行
+    except ValueError:
+        pass  # 是域名，继续检查
+    # 内网域名后缀/惯用名
+    _BANNED_HOSTS = ("localhost", "localhost.localdomain", "metadata.google.internal",
+                     "169.254.169.254", "instance-data")
+    if host.lower() in _BANNED_HOSTS or host.lower().endswith(".internal") or host.lower().endswith(".local"):
+        return f"禁止探测内网域名: {host}"
+    return None
+
 def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
     """连通性探测：发一次最小请求验证 model+base_url+key 是否可用。
 
@@ -667,8 +729,15 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
     - {"ok": bool, "status_code": int|None, "error": str, "latency_ms": int}
     - 超时 5s，避免拖慢保存体验
     - 用 max_tokens=1 极简请求，几乎不消耗额度
+
+    安全审查 S6 修复：仅允许 https 公网地址（防 SSRF 内网探测），
+    错误信息不再回显响应体（防借探测读取内网服务内容）。
     """
     import time as _time
+    # SSRF 防护：探测前校验目标
+    reject = _validate_llm_url(base_url)
+    if reject:
+        return {"ok": False, "status_code": None, "error": f"目标地址被拒绝：{reject}", "latency_ms": 0}
     try:
         from requests import post, exceptions
     except ImportError:
@@ -700,7 +769,8 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
         latency = int((_time.time() - t0) * 1000)
         if resp.status_code == 200:
             return {"ok": True, "status_code": 200, "error": "", "latency_ms": latency}
-        return {"ok": False, "status_code": resp.status_code, "error": f"HTTP {resp.status_code}: {resp.text[:200]}", "latency_ms": latency}
+        # 安全审查 S6：不回显响应体（防借探测接口读取内网服务内容），只回状态码
+        return {"ok": False, "status_code": resp.status_code, "error": f"HTTP {resp.status_code}（服务端返回非 200）", "latency_ms": latency}
     except exceptions.Timeout:
         latency = int((_time.time() - t0) * 1000)
         return {"ok": False, "status_code": None, "error": f"探测超时（>5s）", "latency_ms": latency}

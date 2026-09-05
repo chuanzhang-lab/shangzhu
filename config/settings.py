@@ -11,10 +11,15 @@ import logging
 import os
 import tempfile
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# 串行化配置的「读-改-写」：save_llm_config 是 load→改→写三步复合操作，
+# 并发保存会丢失后写者未见的前写者字段改动（lost update）。
+_CONFIG_LOCK = threading.Lock()
 
 # 默认配置（当配置文件不存在或损坏时使用）
 _DEFAULT_CONFIG = {
@@ -173,6 +178,22 @@ def get_llm_config_view() -> dict:
     return get_masked()
 
 
+def update_config(mutator) -> dict:
+    """锁内原子读-改-写：mutator(inner_dict) 就地修改配置，返回脱敏视图。
+
+    审查修复 F1 补全：save_llm_config 只能串行化「单次保存」，但调用方若
+    先 load() 再传回 save_llm_config（锁外读），仍会以过期基底覆盖并发改动。
+    需要读-改-写的调用方应改用本函数，把修改逻辑闭包传入，全程持锁。
+    """
+    with _CONFIG_LOCK:
+        config = load()
+        inner = config.get("config", {}).copy()
+        mutator(inner)
+        ok, msg = save({"config": inner})
+        if not ok:
+            raise ValueError(msg)
+        return get_masked()
+
 def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
     """保存 LLM 配置，返回脱敏视图。
     
@@ -187,19 +208,21 @@ def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
     异常:
         ValueError: 参数校验失败
     """
-    # 读取现有配置
-    config = load()
-    inner = config.get("config", {}).copy()
-    
-    # 更新字段
-    inner["model"] = model.strip()
-    inner["base_url"] = base_url.strip()
-    if api_key:
-        inner["api_key"] = api_key.strip()
-    
-    # 保存
-    ok, msg = save({"config": inner})
-    if not ok:
-        raise ValueError(msg)
-    
-    return get_masked()
+    # 读-改-写全程持锁：防止并发保存丢失字段改动（lost update）
+    with _CONFIG_LOCK:
+        # 读取现有配置
+        config = load()
+        inner = config.get("config", {}).copy()
+
+        # 更新字段
+        inner["model"] = model.strip()
+        inner["base_url"] = base_url.strip()
+        if api_key:
+            inner["api_key"] = api_key.strip()
+
+        # 保存
+        ok, msg = save({"config": inner})
+        if not ok:
+            raise ValueError(msg)
+
+        return get_masked()

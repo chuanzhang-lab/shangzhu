@@ -47,6 +47,10 @@ import test_cashflow as t17
 import test_derived as t18
 import test_consistency as t19
 import test_field_model as t20
+import test_config_priority as t21
+import test_direction_2_4 as t22
+import test_direction_5_1 as t23
+import test_concurrency_fixes as t24
 
 
 def _run_module(mod, label):
@@ -94,6 +98,10 @@ if __name__ == "__main__":
         (t18, "Derived · 精确推算层"),
         (t19, "Consistency · 数据一致性（派生一致性）"),
         (t20, "FieldModel · 声明式字段模型"),
+        (t21, "ConfigPriority · 配置优先级"),
+        (t22, "Direction2_4 · 方向2.4/2.5"),
+        (t23, "Direction5_1 · 方向5.1"),
+        (t24, "Concurrency · 并发安全修复守护"),
     ):
         p, f = _run_module(mod, label)
         total_p += p

@@ -74,14 +74,14 @@ class TestTestLlmSettings:
     def test_test_endpoint_missing_model(self, client):
         r = client.post("/settings/llm/test", json={
             "model": "", "base_url": "https://api.longcat.chat/openai",
-            "api_key": "REMOVED_LEAKED_KEY",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
         }, headers=XHR)
         assert r.status_code == 400
 
     def test_test_endpoint_missing_base_url(self, client):
         r = client.post("/settings/llm/test", json={
             "model": "LongCat-2.0", "base_url": "",
-            "api_key": "REMOVED_LEAKED_KEY",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
         }, headers=XHR)
         assert r.status_code == 400
 
@@ -112,7 +112,7 @@ class TestTestLlmSettings:
         monkeypatch.setattr(req, "post", lambda *a, **k: MockResponse())
         r = client.post("/settings/llm/test", json={
             "model": "LongCat-2.0", "base_url": "https://api.longcat.chat/openai",
-            "api_key": "REMOVED_LEAKED_KEY",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
         }, headers=XHR)
         assert r.status_code == 200
         data = r.json()
@@ -126,7 +126,7 @@ class TestTestLlmSettings:
         monkeypatch.setattr(req, "post", lambda *a, **k: MockResponse())
         r = client.post("/settings/llm/test", json={
             "model": "Bad", "base_url": "https://api.deepseek.com/v1",
-            "api_key": "REMOVED_LEAKED_KEY",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
         }, headers=XHR)
         data = r.json()
         assert data["ok"] is False
@@ -153,7 +153,7 @@ class TestTestLlmSettings:
         monkeypatch.setattr(req, "post", mock_timeout)
         r = client.post("/settings/llm/test", json={
             "model": "LongCat-2.0", "base_url": "https://api.longcat.chat/openai",
-            "api_key": "REMOVED_LEAKED_KEY",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
         }, headers=XHR)
         data = r.json()
         assert data["ok"] is False

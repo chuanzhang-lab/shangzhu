@@ -50,7 +50,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # 路径设置
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +78,11 @@ from session_state import (
     session_stats,
     to_llm_view,
     infer_focus_fields,
+    get_advise_meta,
+    reset_advise_count,
+    incr_advise_count,
+    get_turn_number,
+    get_biz_snapshot,
 )
 
 # 工具（直调，不走 LLM）
@@ -101,6 +106,7 @@ from llm_advisor import (
     get_base_url,
     has_api_key,
     test_llm_config,
+    invalidate_llm_cache,
 )
 from config.settings import get_llm_config_view, save_llm_config
 from op_executor import (
@@ -276,8 +282,9 @@ def _render_guard_banner(guard_info: dict, scan: dict) -> str:
 
 def _build_advise_context(tid: str, scan: dict) -> dict:
     """构建主持人模式所需的 context 对象，供 LLM 决定追问/推荐/静默。"""
-    st = get_state(tid)
-    meta = st.get("_advise_meta", {})
+    # 审查修复 F4：锁内快照读取（get_advise_meta / get_turn_number），
+    # 不再持有 get_state 引用在锁外读，避免与 apply_turn 并发写交错。
+    meta = get_advise_meta(tid)
     snap = to_llm_view(tid)
 
     # 缺失参数（[param_sources] 含 [缺失] 的字段）
@@ -300,25 +307,22 @@ def _build_advise_context(tid: str, scan: dict) -> dict:
         "question_count": meta.get("question_count", 0),
         "missing_params": missing_params,
         "has_default": has_default,
-        "turn_number": st.get("turn", 0),
+        "turn_number": get_turn_number(tid),
         "industry": snap.get("industry"),
     }
 
 
 def _reset_advise_meta(tid: str):
     """追问打断「连续推荐」时，清零推荐计数（重新给推荐机会）。"""
-    st = get_state(tid)
-    if "_advise_meta" not in st:
-        st["_advise_meta"] = {}
-    st["_advise_meta"]["recommendation_count"] = 0
+    # 审查修复 F4：改调 session_state 锁内 API，原先锁外 st[...] = 0 是
+    # 与 apply_turn 并发时的裸写。
+    reset_advise_count(tid, "recommendation_count")
 
 
 def _incr_advise_meta(tid: str, field: str):
     """增加指定计数器（recommendation / comparison / question）。"""
-    st = get_state(tid)
-    if "_advise_meta" not in st:
-        st["_advise_meta"] = {}
-    st["_advise_meta"][field] = st["_advise_meta"].get(field, 0) + 1
+    # 审查修复 F4：同上，锁内原子自增，防并发丢计数。
+    incr_advise_count(tid, field)
 
 
 # 候选方案序号标签：A/B/C/D
@@ -490,21 +494,24 @@ def _route_intent(intent: str, merged_params: dict, user_text: str) -> Optional[
 # ─── Pydantic 模型 ─────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    # 安全审查 S7：单条消息长度上限（防超长输入拖爆解析/存储）
+    content: str = Field(max_length=50000)
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
+    # 安全审查 S7：消息条数上限（防构造超大 messages 数组 DoS）
+    messages: list[ChatMessage] = Field(max_length=100)
     thread_id: Optional[str] = "default"
     task_id: Optional[str] = None
 
 
 class TaskReq(BaseModel):
-    name: str = "新任务"
+    # 安全审查 S7：任务名长度上限（防超大任务名入库）
+    name: str = Field(default="新任务", max_length=100)
 
 
 class TaskRename(BaseModel):
-    name: str
+    name: str = Field(max_length=100)
 
 
 # ─── FastAPI 应用 ──────────────────────────────────────────────────────────
@@ -558,7 +565,7 @@ CHAT_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>创业者工作台</title>
-<link rel="stylesheet" href="/static/app.css?v=20260902a">
+<link rel="stylesheet" href="/static/app.css?v=20260905a">
 </head>
 <body>
 <header>
@@ -632,7 +639,7 @@ CHAT_HTML = """<!DOCTYPE html>
     <div id="advisor-list" style="display:none;"></div>
   </aside>
 </div>
-<script src="/static/app.js?v=20260902a"></script>
+<script src="/static/app.js?v=20260905a"></script>
 </body>
 </html>
 """
@@ -707,12 +714,16 @@ async def set_llm_settings(req: Request):
 
     try:
         view = save_llm_config(model, base_url, api_key)
+        # 审查修复 F7：保存成功后立即失效 LLM client 缓存，
+        # 缩短「新配置已存但旧 client 仍在用」的不一致窗口。
+        invalidate_llm_cache()
     except ValueError as e:
-        # 参数校验失败（如 API Key 过短）→ 400
+        # 参数校验失败（如 API Key 过短）→ 400（校验消息为自控文案，无内部信息）
         return JSONResponse({"error": str(e)}, status_code=400)
-    except Exception as e:
+    except Exception:
+        # 安全审查 S3：非预期异常不透传原文（可能含内部路径），详情只进日志
         logger.exception("保存模型配置失败")
-        return JSONResponse({"error": f"保存失败: {e}"}, status_code=500)
+        return JSONResponse({"error": "保存失败，请稍后重试或查看服务日志"}, status_code=500)
 
     return JSONResponse({"ok": True, **view})
 
@@ -748,7 +759,8 @@ async def test_llm_settings(req: Request):
         result = test_llm_config(model, base_url, api_key)
     except Exception as e:
         logger.exception("连通性探测失败")
-        return JSONResponse({"ok": False, "error": f"探测失败: {e}"}, status_code=500)
+        # 安全审查 S3：同上，异常原文不透传
+        return JSONResponse({"ok": False, "error": "探测失败，请稍后重试或查看服务日志"}, status_code=500)
 
     return JSONResponse(result)
 
@@ -793,7 +805,7 @@ async def delete_task(task_id: str):
 
 def _build_scan_for_advisor(tid: str) -> dict:
     """为顾问面板构建 scan：复用 quick_scan 逻辑。"""
-    params = get_state(tid).get("params", {})
+    params = get_biz_snapshot(tid)["params"]
     params_json = json.dumps(params, ensure_ascii=False)
     try:
         return json.loads(quick_scan_tool.invoke({"params_json": params_json}))
@@ -858,7 +870,7 @@ async def preview_advisor_action(tid: str, op: str):
     if not ok:
         return JSONResponse({"ok": False, "preview": "", "reason": reason})
 
-    base_params = get_state(tid).get("params", {})
+    base_params = get_biz_snapshot(tid)["params"]
     preview = await asyncio.to_thread(
         preview_op, op_dict, base_params, quick_scan_tool,
     )
@@ -1017,18 +1029,19 @@ async def chat(req: ChatRequest):
         guard_info: dict = {}
         if should_merge:
             # 带守门合并：自动检测「6000% vs 历史 60%」类矛盾，挂到 state 前置展示
-            st, guard_info = apply_turn_guarded(
-                tid, params, last_user_msg, industry
-            )
+            apply_turn_guarded(tid, params, last_user_msg, industry)
+            # 审查修复 F4：合并后锁内一次取齐业务快照，不再持有共享引用锁外分次读
+            snap = get_biz_snapshot(tid)
+            guard_info = snap["pending_guard"]
         else:
             # 本句无任何项目参数，或意图不累积参数：沿用已有 session
-            st = get_state(tid)
-            guard_info = st.get("_pending_guard", {})
-        # 始终浅拷贝，避免下游 setdefault/工具侧写污染 SessionState
-        merged = dict(st.get("params") or {})
+            snap = get_biz_snapshot(tid)
+            guard_info = snap["pending_guard"]
+        # 快照已是深拷贝，下游 setdefault/工具侧写不会污染 SessionState
+        merged = snap["params"]
         # 无论哪种情况，都把会话中的行业注入 params，避免下游工具丢失项目类型
-        if st.get("industry"):
-            merged.setdefault("industry", st["industry"])
+        if snap["industry"]:
+            merged.setdefault("industry", snap["industry"])
 
         # ── 步骤 1.6: 应用 LLM 上轮提议的 ops（Tier 1，人在环「应用」关键词触发）──
         # 用户回「应用」/「应用A」/「应用1」时，校验并应用上次挂到 session 的候选，
@@ -1177,7 +1190,8 @@ async def chat(req: ChatRequest):
         # ── 步骤 3: chitchat → 走 Engine Steward（只读、看清净背景当对话伙伴）──
         # (B) Coze 自由 agent 非本仓交付物；本地工作台只用引擎管理者(llm_advisor)做解读，
         # 不引入自由 agent，避免编造未在会话中出现的具体数字（如历史 bug「成都冒菜店/7.5万」）。
-        snapshot = get_state(tid)
+        # 审查修复 F4：锁内快照，不持有共享引用
+        snapshot = get_biz_snapshot(tid)
         grounding = get_session_context(tid)
         clean_view = to_llm_view(tid, focus_fields=infer_focus_fields(last_user_msg))
         # 用当前会话状态构造 scan，供 Steward 接地解读（无状态则空 scan）

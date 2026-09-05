@@ -370,6 +370,54 @@ def set_pending_ops(thread_id: str, ops: list) -> None:
         if thread_id in _SESSIONS:
             _SESSIONS[thread_id]["_pending_ops"] = ops
 
+# ── 主持人模式计数器（锁内读-改-写，审查修复 F4）───────────────────────
+# 原实现在 web_server 锁外直接 st["_advise_meta"][field] += 1，并发轮次会丢计数。
+
+def get_advise_meta(thread_id: str) -> dict:
+    """锁内读取 _advise_meta 快照（浅拷贝），供锁外只读使用。"""
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        return dict(st.get("_advise_meta", {})) if st else {}
+
+def reset_advise_count(thread_id: str, field: str = "recommendation_count") -> None:
+    """锁内把指定计数器清零。"""
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        if st is not None:
+            st.setdefault("_advise_meta", {})[field] = 0
+
+def incr_advise_count(thread_id: str, field: str) -> None:
+    """锁内自增指定计数器（原子读-改-写）。"""
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        if st is not None:
+            meta = st.setdefault("_advise_meta", {})
+            meta[field] = meta.get(field, 0) + 1
+
+def get_turn_number(thread_id: str) -> int:
+    """锁内读取轮次号。"""
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        return st.get("turn", 0) if st else 0
+
+def get_biz_snapshot(thread_id: str) -> dict:
+    """锁内一次性读取业务快照（params / industry / _pending_guard）。
+
+    审查修复 F4：web_server 此前持有 get_state 返回的共享引用在锁外
+    分次读 st.get("params") / st.get("industry")，两次读之间可能被并发
+    apply_turn 写入，导致跨字段不一致。本函数在锁内一次取齐，返回深拷贝。
+    """
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        if st is None:
+            return {"params": {}, "industry": None, "pending_guard": {}}
+        import copy
+        return {
+            "params": copy.deepcopy(st.get("params") or {}),
+            "industry": st.get("industry"),
+            "pending_guard": dict(st.get("_pending_guard") or {}),
+        }
+
 
 # ── P0 数据基础层：已采纳假设（basis=hypothesis）登记 ─────────────────────
 
