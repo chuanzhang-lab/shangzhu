@@ -15,6 +15,7 @@ agent.py 管 chitchat 闲聊路径，本模块管「基于标注给建议」的�
 import os
 import json
 import logging
+from typing import Optional
 import copy
 import re
 import tempfile
