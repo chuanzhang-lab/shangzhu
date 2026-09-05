@@ -476,10 +476,21 @@ class PostgresStore(BaseStore):
         ))
 
     def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
-        self._execute(lambda cur: cur.execute(
-            "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, %s, %s, %s)",
-            (task_id, role, content, turn),
-        ))
+        def _run(cur):
+            cur.execute(
+                "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, %s, %s, %s)",
+                (task_id, role, content, turn),
+            )
+            # R2 修复：与 MemoryStore/LocalFileStore 对齐，单任务消息上限 500，
+            # 超限删除最旧消息，防 messages 表无限增长（磁盘 + 全量读劣化）
+            cur.execute(
+                "DELETE FROM messages WHERE task_id = %s AND id NOT IN ("
+                "SELECT id FROM messages WHERE task_id = %s "
+                "ORDER BY id DESC LIMIT %s)",
+                (task_id, task_id, _MAX_MESSAGES_PER_TASK),
+            )
+
+        self._execute(_run)
 
     def get_messages(self, task_id: str) -> List[dict]:
         def _run(cur):

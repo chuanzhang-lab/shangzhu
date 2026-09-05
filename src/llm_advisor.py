@@ -349,6 +349,21 @@ def _emit_anomaly_report(scan: dict):
 _llm_cache = None
 
 
+def _close_llm(client) -> None:
+    """R3 修复：显式关闭旧 LLM client 的底层连接（openai/httpx 连接池），
+    避免配置切换时旧实例仅靠 GC __del__ 延迟释放 socket。"""
+    if client is None:
+        return
+    try:
+        inner = getattr(client, "_client", None)
+        if inner is not None and hasattr(inner, "close"):
+            inner.close()
+        if hasattr(client, "close") and callable(client.close):
+            client.close()
+    except Exception:
+        pass
+
+
 def _get_llm() -> ChatOpenAI:
     global _llm_cache
     # 加锁：web_server 用线程池并发调用时，多个首调可能同时触发初始化竞态。
@@ -389,6 +404,7 @@ def _get_llm() -> ChatOpenAI:
                 streaming=False,
             )
             client._shangzhu_sig = cache_sig  # type: ignore[attr-defined]
+            _close_llm(_llm_cache)  # R3 修复：重建前关闭旧连接，防 socket 泄漏
             _llm_cache = client
         return _llm_cache  # 审查修复 F5：return 入锁，避免锁外读到半初始化状态
 
@@ -396,6 +412,7 @@ def invalidate_llm_cache() -> None:
     """锁内显式失效 LLM client 缓存（配置保存后调用，修复 F7 窗口）。"""
     global _llm_cache
     with _llm_cache_lock:
+        _close_llm(_llm_cache)  # R3 修复：失效时同步关闭底层连接
         _llm_cache = None
 
 
@@ -631,6 +648,7 @@ def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
         view = _settings_save(model, base_url, api_key)
         # settings 写成功后同步失效 LLM client 缓存（修复 F7：缩短旧配置残留窗口）
         with _llm_cache_lock:
+            _close_llm(_llm_cache)  # R3 修复：关闭旧连接
             _llm_cache = None
         return view
     except ValueError:

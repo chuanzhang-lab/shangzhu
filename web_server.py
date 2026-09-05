@@ -40,6 +40,7 @@ import json
 import re
 import uuid as _uuid
 import logging
+import logging.handlers
 import asyncio
 import time
 from typing import Any, Dict, AsyncGenerator, Optional
@@ -163,10 +164,13 @@ def _setup_logging() -> logging.Logger:
     log.addHandler(console)
 
     # 文件（便于后台运行/排查）
+    # R1 修复：RotatingFileHandler 轮转，防 web_server.log 无限增长吃满磁盘
     log_dir = os.path.join(SCRIPT_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
-    file_handler = logging.FileHandler(
+    file_handler = logging.handlers.RotatingFileHandler(
         os.path.join(log_dir, "web_server.log"),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
         encoding="utf-8",
     )
     file_handler.setFormatter(fmt)
