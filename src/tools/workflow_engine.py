@@ -70,6 +70,72 @@ def _load_templates() -> dict:
         return yaml.safe_load(f) or {}
 
 
+_STEP_RULES_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "config", "step_rules.yaml",
+)
+
+
+@lru_cache(maxsize=1)
+def _load_step_rules() -> dict:
+    """从 YAML 读取阶梯依赖规则，返回 {field: rule_dict}。"""
+    try:
+        with open(_STEP_RULES_PATH, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data.get("step_rules", {})
+    except FileNotFoundError:
+        return {}
+
+
+def _apply_step_rules(params: dict, src: dict) -> tuple:
+    """应用阶梯依赖规则，返回 (params, src, changed_fields)。
+
+    规则语义：当 trigger 字段的值落入某个 range 时，自动推算 target 字段的值。
+    - 用户显式输入的字段（src 以 [用户] 开头）不被覆盖
+    - 最多迭代 5 次防止循环依赖
+    - 返回 changed_fields 列表供上层标注
+    """
+    rules = _load_step_rules()
+    if not rules:
+        return params, src, []
+
+    changed_fields = []
+    for _iteration in range(5):
+        any_changed = False
+        for target_field, rule in rules.items():
+            # 用户显式值不覆盖
+            if src.get(target_field, "").startswith("[用户]"):
+                continue
+            trigger_field = rule.get("trigger")
+            if not trigger_field:
+                continue
+            trigger_val = params.get(trigger_field)
+            if trigger_val is None:
+                continue
+            # 收入序列取第一个值
+            if isinstance(trigger_val, (list, tuple)):
+                trigger_val = trigger_val[0] if trigger_val else None
+            if trigger_val is None:
+                continue
+            for r in rule.get("ranges", []):
+                lo = r.get("min", 0)
+                hi = r.get("max", float("inf"))
+                if lo <= trigger_val < hi:
+                    new_val = r["value"]
+                    old_val = params.get(target_field)
+                    if old_val != new_val:
+                        params[target_field] = new_val
+                        note = r.get("note", "")
+                        src[target_field] = f"[阶梯] {trigger_field}={trigger_val:g} → {target_field}={new_val}"
+                        if target_field not in changed_fields:
+                            changed_fields.append(target_field)
+                        any_changed = True
+                    break
+        if not any_changed:
+            break
+    return params, src, changed_fields
+
+
 def _get_templates() -> dict:
     return _load_templates()
 
@@ -310,11 +376,17 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
     # src 标注（[用户]/[推算]/[缺失]）仍由 _fill_params 生成——它是「来源语义」，
     # 不是公式，模型层不管。
 
-    # 月营收：优先用户直接给的数值
+    # 月营收：优先用户直接给的数值（支持数组：多期收入序列）
     revenue_override = raw_params.get("monthly_revenue") or raw_params.get("initial_monthly_revenue")
     if revenue_override:
-        p["monthly_revenue"] = revenue_override
-        src["monthly_revenue"] = "[用户]"
+        if isinstance(revenue_override, (list, tuple)) and len(revenue_override) > 0:
+            # 多期收入序列：保留为数组，derive() 用第一个值做单期推算
+            p["monthly_revenue"] = revenue_override
+            p["_revenue_series"] = list(revenue_override)  # 备份原始序列
+            src["monthly_revenue"] = f"[用户] 多期序列({len(revenue_override)}期)"
+        else:
+            p["monthly_revenue"] = revenue_override
+            src["monthly_revenue"] = "[用户]"
     # 否则让 derive() 从 traffic×price×30 算（src 在下面统一标注）
 
     # 固定成本组件字段（水电/包装/提成/其他固定）——用户给的输入
@@ -617,7 +689,11 @@ def _check_sufficiency(params: dict, param_sources: dict) -> dict:
     - 软缺口：总投资 / 人工 缺失则列入 gaps（提示但不致命，按 0 计并标注）。
     """
     gaps = []
-    if not (params.get("monthly_revenue") and params["monthly_revenue"] > 0):
+    rev = params.get("monthly_revenue")
+    # 收入序列：取第一个值判断充分性
+    if isinstance(rev, (list, tuple)):
+        rev = rev[0] if rev else None
+    if not (rev and rev > 0):
         gaps.append("月营收（或 日均客流 + 客单价）")
     if param_sources.get("total_investment", "").startswith("[缺失]"):
         gaps.append("总投资（算跑道/风险需要）")
@@ -657,6 +733,8 @@ def _build_assumptions(params: dict, param_sources: dict) -> list:
 def _build_framework(params: dict, param_sources: dict) -> dict:
     """门禁拦下时，给出收入/成本模型的已知框架（只算有真实输入的部分）。"""
     rev = params.get("monthly_revenue", 0) or 0
+    if isinstance(rev, (list, tuple)):
+        rev = rev[0] if rev else 0
     rent = params.get("monthly_rent", 0) or 0
     labor = (params.get("employee_count", 0) or 0) * (params.get("avg_salary", 0) or 0)
     return {
@@ -694,80 +772,169 @@ def _profit_readiness(params: dict) -> tuple[bool, str]:
 
 
 def _project_trend_12m(params: dict) -> dict:
-    """生成 12 个月的趋势预测"""
-    base_revenue = params["monthly_revenue"]
-    growth = params.get("monthly_growth_rate")
-    if growth is None:
-        growth = 0.0  # 增长参数缺失按 0 增长（不瞎填默认，但可安全计算）
-    seasonal = params.get("seasonal_factor")
-    if seasonal is None:
-        seasonal = 1.0  # 季节因子缺失按 1.0（中性），避免 None 参与乘法崩溃
-    fixed_cost = params["monthly_fixed_cost"]
-    vc_ratio = params["variable_cost_ratio"]
-    available = params["available_cash"]
+    """生成多期趋势预测。
+
+    支持两种输入模式：
+    1. 单值 + growth_rate：base_revenue * (1+g)^n * seasonal（原逻辑）
+    2. 收入序列：monthly_revenue=[30000, 45000, 60000, ...]，直接逐期计算
+
+    收入序列模式下 growth_rate/seasonal_factor 仍可叠加（乘以序列值），
+    但通常用户给序列时不再给增长率。
+    """
+    # 收入序列：优先从 _revenue_series 读（_fill_and_assess 标准化后 monthly_revenue 是标量）
+    revenue_input = params.get("_revenue_series") or params["monthly_revenue"]
+    growth = params.get("monthly_growth_rate") or 0.0
+    seasonal = params.get("seasonal_factor") or 1.0
+    fixed_cost = params.get("monthly_fixed_cost")
+    vc_ratio = params.get("variable_cost_ratio")
+    available = params.get("available_cash")
+
+    # 防御：收入为 None 或空序列 → 返回空结果
+    if revenue_input is None or (isinstance(revenue_input, (list, tuple)) and len(revenue_input) == 0):
+        return {"months": [], "input_mode": "unknown", "months_count": 0,
+                "summary": {"total_annual_profit": 0, "max_monthly_loss": 0,
+                            "months_to_profitability": None, "months_to_breakeven": None,
+                            "trend_direction": "➡️ 持平"}}
+
+    # 判断输入模式：序列 vs 单值
+    is_series = isinstance(revenue_input, (list, tuple)) and len(revenue_input) > 0
+    if is_series:
+        series = [float(x) for x in revenue_input]
+        # 序列模式：如果用户指定了 analysis_months 则用，否则默认 12 期
+        # 序列内的值直接使用，序列用完后按 growth_rate 延续
+        user_months = params.get("analysis_months")
+        months_count = max(len(series), user_months) if user_months else max(len(series), 12)
+        post_series_growth = growth
+    else:
+        base_revenue = float(revenue_input)
+        # analysis_months 支持用户指定预测期数，默认 12
+        months_count = params.get("analysis_months") or 12
+        if months_count < 1:
+            months_count = 12
+
+    season_map = {1: 0.85, 2: 0.95, 3: 1.0, 4: 1.05, 5: 1.05, 6: 1.1,
+                  7: 1.1, 8: 1.05, 9: 1.0, 10: 1.0, 11: 0.95, 12: 0.9}
 
     months = []
     cumulative_profit = 0
-    cash = available if available is not None else 0  # 可用现金缺失时按 0 起算，避免崩溃
+    cash = available if available is not None else 0
     breakeven_month = None
     months_to_profit = None
 
-    for m in range(1, 13):
-        # 季节性因子（Q2/Q3 偏高，Q1/Q4 偏低）
-        season_map = {1: 0.85, 2: 0.95, 3: 1.0, 4: 1.05, 5: 1.05, 6: 1.1,
-                      7: 1.1, 8: 1.05, 9: 1.0, 10: 1.0, 11: 0.95, 12: 0.9}
-        s = season_map.get(m, 1.0) * seasonal
+    for m in range(1, months_count + 1):
+        s = season_map.get(((m - 1) % 12) + 1, 1.0) * seasonal
 
-        # 增长因子（复合增长）
-        g = (1 + growth) ** (m - 1)
+        if is_series:
+            if m <= len(series):
+                revenue = series[m - 1] * s
+            else:
+                # 序列用完后，用最后一个值 × 延续增长率
+                last = series[-1]
+                extra_months = m - len(series)
+                revenue = last * ((1 + post_series_growth) ** extra_months) * s
+        else:
+            g = (1 + growth) ** (m - 1)
+            revenue = base_revenue * g * s
 
-        revenue = base_revenue * g * s
-        variable = revenue * vc_ratio
-        profit = revenue - fixed_cost - variable
-        cumulative_profit += profit
-        cash += profit
+        variable = revenue * vc_ratio if vc_ratio is not None else 0
+        profit = revenue - fixed_cost - variable if fixed_cost is not None else None
+        if profit is not None:
+            cumulative_profit += profit
+            cash += profit
 
         month_data = {
             "month": m,
             "revenue": round(revenue, 0),
-            "fixed_cost": round(fixed_cost, 0),
-            "variable_cost": round(variable, 0),
-            "profit": round(profit, 0),
+            "fixed_cost": round(fixed_cost, 0) if fixed_cost is not None else None,
+            "variable_cost": round(variable, 0) if vc_ratio is not None else None,
+            "profit": round(profit, 0) if profit is not None else None,
             "cumulative_profit": round(cumulative_profit, 0),
             "cash_remaining": round(cash, 0),
         }
         months.append(month_data)
 
-        # 记录首次盈利月
-        if months_to_profit is None and profit > 0:
-            months_to_profit = m
-        # 记录累计回本月
-        if breakeven_month is None and cumulative_profit > 0:
-            breakeven_month = m
+        if profit is not None:
+            if months_to_profit is None and profit > 0:
+                months_to_profit = m
+            if breakeven_month is None and cumulative_profit > 0:
+                breakeven_month = m
 
-    total_annual_profit = sum(m["profit"] for m in months)
-    max_monthly_loss = min(m["profit"] for m in months)
+    valid_profits = [m["profit"] for m in months if m["profit"] is not None]
+    total_annual_profit = sum(valid_profits) if valid_profits else 0
+    max_monthly_loss = min(valid_profits) if valid_profits else 0
 
-    return {
+    result = {
         "months": months,
+        "input_mode": "series" if is_series else "growth_rate",
+        "months_count": months_count,
         "summary": {
             "total_annual_profit": round(total_annual_profit, 0),
             "max_monthly_loss": round(max_monthly_loss, 0),
             "months_to_profitability": months_to_profit,
             "months_to_breakeven": breakeven_month,
-            "trend_direction": "📈 上升" if months[-1]["profit"] > months[0]["profit"] else "📉 下降",
+            "trend_direction": (
+                "📈 上升" if len(months) >= 2 and months[-1]["profit"] is not None
+                and months[0]["profit"] is not None
+                and months[-1]["profit"] > months[0]["profit"]
+                else "📉 下降" if len(months) >= 2 and months[-1]["profit"] is not None
+                and months[0]["profit"] is not None
+                else "➡️ 持平"
+            ),
         },
     }
+    # NPV/IRR（基于趋势现金流）
+    if is_series or params.get("total_investment"):
+        cashflows = []
+        if params.get("total_investment"):
+            cashflows.append(-float(params["total_investment"]))
+        for m in months:
+            if m["profit"] is not None:
+                cashflows.append(float(m["profit"]))
+        if len(cashflows) >= 2:
+            from tools.financial_calculator import _npv_raw, _irr_raw
+            npv = _npv_raw(0.08, cashflows)
+            irr = _irr_raw(cashflows)
+            result["investment_metrics"] = {
+                "npv_8pct": round(npv, 0),
+                "irr": round(irr, 4) if irr is not None else None,
+                "irr_percent": f"{irr*100:.1f}%" if irr is not None else "无法收敛",
+                "payback_months": breakeven_month,
+                "discount_rate": "8%",
+                "cashflow_count": len(cashflows),
+            }
+    # 动态跑道（逐月扣减，找到现金耗尽月）
+    if available is not None and available > 0:
+        dynamic_runway = None
+        min_cash = available
+        min_cash_month = 0
+        running_cash = available
+        for m in months:
+            if m["profit"] is not None:
+                running_cash += m["profit"]
+                if running_cash < min_cash:
+                    min_cash = running_cash
+                    min_cash_month = m["month"]
+                if running_cash <= 0 and dynamic_runway is None:
+                    dynamic_runway = m["month"]
+        result["dynamic_runway"] = {
+            "runway_months": dynamic_runway,
+            "runway_label": f"{dynamic_runway} 个月" if dynamic_runway else f">{months_count} 个月（未耗尽）",
+            "min_cash": round(min_cash, 0),
+            "min_cash_month": min_cash_month,
+        }
+
+    return result
 
 
 def _safe_runway(params: dict):
     """可用现金缺失时返回 '未知'，否则返回跑道月数（避免 None 参与除法崩溃）。"""
     if params.get("available_cash") is None:
         return "未知"
-    # 固定成本/变动成本缺失按 0 处理（与 _runway_numeric 风格一致），避免 None 相加崩溃
     burn = (params["monthly_fixed_cost"] or 0) + (params.get("monthly_variable_cost") or 0)
-    return _calc_runway(params["available_cash"], burn,
-                        params["monthly_revenue"]).get("runway_months", "N/A")
+    rev = params["monthly_revenue"]
+    if isinstance(rev, (list, tuple)):
+        rev = rev[0] if rev else 0
+    return _calc_runway(params["available_cash"], burn, rev).get("runway_months", "N/A")
 
 
 # ─── 精确推算层（推算式：由用户给出基础值 → 确定公式 → 关联参数）─────────
@@ -794,6 +961,15 @@ def _fill_and_assess(raw: dict) -> dict:
     输出 12 个月全 -8000 的静默误报）。
     """
     params, src, mixed = _fill_params(raw)
+    # 阶梯依赖：营收→员工数→租金等联动推算（用户显式值不覆盖）
+    params, src, step_changes = _apply_step_rules(params, src)
+    if step_changes:
+        # 阶梯规则触发后，重新计算派生字段（人工/固定成本/利润等）
+        from field_model import derive as _model_derive
+        _dv, _dm = _model_derive(params)
+        for dk, dv in _dv.items():
+            if dk not in params or params.get(dk) is None:
+                params[dk] = dv
     conf = _derive_conf(src)
     suff = _check_sufficiency(params, src)
     # P0：数据基础分类（user/missing/hypothesis），供决策层与输出层用
@@ -803,6 +979,12 @@ def _fill_and_assess(raw: dict) -> dict:
     # 一致性规则唯一出处已上移到 field_model.CONSISTENCY_RULES。
     from field_model import consistency_issues
     derived_issues = consistency_issues(params)
+    # 收入序列标准化：把数组保存到 _revenue_series，params["monthly_revenue"] 标准化为标量
+    # 这样下游所有单期算术（保本/敏感性/场景/陷阱）都用标量，趋势预测用 _revenue_series
+    rev_val = params.get("monthly_revenue")
+    if isinstance(rev_val, (list, tuple)) and len(rev_val) > 0:
+        params["_revenue_series"] = list(rev_val)
+        params["monthly_revenue"] = float(rev_val[0])
     return {
         "params": params,
         "src": src,
@@ -851,12 +1033,15 @@ def _recompute_outputs(params: dict):
     """给定填充后的参数，重算 (月利润, 跑道月数)。避免重跑 _fill_params。
 
     D2：变动成本率缺失时 vc=None → 利润返回 None，不再算假硬数。
+    收入序列模式：取序列第一个值做单期计算。
     """
     rev = params["monthly_revenue"]
+    # 收入序列：取第一个值做单期快照
+    if isinstance(rev, (list, tuple)):
+        rev = rev[0] if rev else None
     vc = params.get("variable_cost_ratio")
     if vc is None:
         return None, _runway_numeric(params)
-    rev = params["monthly_revenue"]
     fixed = params.get("monthly_fixed_cost")
     if rev is None or fixed is None:
         return None, _runway_numeric(params)
@@ -869,8 +1054,10 @@ def _runway_numeric(params: dict):
     if params.get("available_cash") is None:
         return None
     burn = (params["monthly_fixed_cost"] or 0) + (params.get("monthly_variable_cost") or 0)
-    return _calc_runway(params["available_cash"], burn,
-                        params["monthly_revenue"]).get("runway_months")
+    rev = params["monthly_revenue"]
+    if isinstance(rev, (list, tuple)):
+        rev = rev[0] if rev else 0
+    return _calc_runway(params["available_cash"], burn, rev).get("runway_months")
 
 
 def _build_scenarios(params: dict, src: dict) -> dict:
@@ -1047,11 +1234,15 @@ def quick_scan(params_json: str) -> str:
             }
 
         # ── 模块 2: 现金流（可用现金缺失则跳过跑道计算；固定成本未知则跑道不可算）──
+        # 收入序列模式：单期快照取第一个值
+        _rev_for_calc = params["monthly_revenue"]
+        if isinstance(_rev_for_calc, (list, tuple)):
+            _rev_for_calc = _rev_for_calc[0] if _rev_for_calc else 0
         monthly_var_cost = params.get("monthly_variable_cost") or 0
         fixed_cost = params.get("monthly_fixed_cost")
         if params["available_cash"] is not None and fixed_cost is not None:
             burn = fixed_cost + monthly_var_cost
-            rw = _calc_runway(params["available_cash"], burn, params["monthly_revenue"])
+            rw = _calc_runway(params["available_cash"], burn, _rev_for_calc)
         elif params["available_cash"] is None:
             rw = {"runway_months": None, "note": "总投资未提供，跑道无法计算"}
         else:
@@ -1109,7 +1300,10 @@ def quick_scan(params_json: str) -> str:
         if daily_be is not None and params["daily_traffic"] is not None:
             be_status = "🔴 客流不足" if params["daily_traffic"] < daily_be else "🟢 可达保本"
         elif rev_based_be is not None and params["monthly_revenue"] is not None:
-            be_status = "🔴 未达保本" if params["monthly_revenue"] < rev_based_be else "🟢 可达保本"
+            _rev_check = params["monthly_revenue"]
+            if isinstance(_rev_check, (list, tuple)):
+                _rev_check = _rev_check[0] if _rev_check else 0
+            be_status = "🔴 未达保本" if _rev_check < rev_based_be else "🟢 可达保本"
         else:
             be_status = "⚪ 部分未知（客单价/客流/营收未给，保本判定不完整）"
         if params.get("gross_margin") is None:
@@ -1124,7 +1318,11 @@ def quick_scan(params_json: str) -> str:
             "mixed_industry_warning": mixed_warning,
             "param_sources": param_sources,
             "core_metrics": {
-                "monthly_revenue": round(params["monthly_revenue"], 0) if params["monthly_revenue"] is not None else None,
+                "monthly_revenue": (
+                    round(params["monthly_revenue"][0], 0)
+                    if isinstance(params["monthly_revenue"], (list, tuple)) and params["monthly_revenue"]
+                    else round(params["monthly_revenue"], 0) if params["monthly_revenue"] is not None else None
+                ),
                 "monthly_profit": round(params["monthly_profit"], 0) if params["monthly_profit"] is not None else None,
                 "daily_breakeven": daily_be,
                 "breakeven_revenue_monthly": rev_based_be,
@@ -1196,6 +1394,23 @@ def quick_scan(params_json: str) -> str:
             # 可用动作列表（供 LLM 主持人推荐下一步）
             "available_actions": _derive_available_actions(params, scenarios),
         }
+
+        # ── 趋势预测（多期模拟器核心）──
+        profit_ready, _ = _profit_readiness(params)
+        if profit_ready:
+            trend = _project_trend_12m(params)
+            dashboard["trend"] = {
+                "input_mode": trend.get("input_mode", "growth_rate"),
+                "months_count": trend.get("months_count", 12),
+                "summary": trend["summary"],
+                "months": trend["months"],
+            }
+            # NPV/IRR（已由 _project_trend_12m 计算）
+            if "investment_metrics" in trend:
+                dashboard["investment_metrics"] = trend["investment_metrics"]
+            # 动态跑道（已由 _project_trend_12m 计算）
+            if "dynamic_runway" in trend:
+                dashboard["dynamic_runway"] = trend["dynamic_runway"]
 
         return json.dumps(dashboard, ensure_ascii=False, indent=2)
 
@@ -1304,8 +1519,15 @@ def compare_scenarios(base_json: str, alt_json: str) -> str:
                 "gaps": profit_gaps,
             }, ensure_ascii=False, indent=2)
 
+        # 收入序列取第一个值做单期 diff
+        base_rev = base_p["monthly_revenue"]
+        alt_rev = alt_p["monthly_revenue"]
+        if isinstance(base_rev, (list, tuple)):
+            base_rev = base_rev[0] if base_rev else 0
+        if isinstance(alt_rev, (list, tuple)):
+            alt_rev = alt_rev[0] if alt_rev else 0
         diff_profit = round(alt_p["monthly_profit"] - base_p["monthly_profit"], 0)
-        diff_revenue = round(alt_p["monthly_revenue"] - base_p["monthly_revenue"], 0)
+        diff_revenue = round(alt_rev - base_rev, 0)
 
         # 两个方案分别做陷阱扫描
         base_pits = _do_full_scan(
@@ -1340,7 +1562,7 @@ def compare_scenarios(base_json: str, alt_json: str) -> str:
         comparison = {
             "base_scenario": {
                 "label": "方案 A",
-                "monthly_revenue": round(base_p["monthly_revenue"], 0),
+                "monthly_revenue": round(base_rev, 0),
                 "monthly_profit": round(base_p["monthly_profit"], 0),
                 "monthly_fixed_cost": round(base_p["monthly_fixed_cost"], 0),
                 "runway_months": _safe_runway(base_p),
@@ -1348,7 +1570,7 @@ def compare_scenarios(base_json: str, alt_json: str) -> str:
             },
             "alt_scenario": {
                 "label": "方案 B",
-                "monthly_revenue": round(alt_p["monthly_revenue"], 0),
+                "monthly_revenue": round(alt_rev, 0),
                 "monthly_profit": round(alt_p["monthly_profit"], 0),
                 "monthly_fixed_cost": round(alt_p["monthly_fixed_cost"], 0),
                 "runway_months": _safe_runway(alt_p),
@@ -1360,6 +1582,33 @@ def compare_scenarios(base_json: str, alt_json: str) -> str:
                 "verdict": "方案 B 更优" if diff_profit > 0 else ("方案 A 更优" if diff_profit < 0 else "两者相当"),
             },
         }
+
+        # 多期趋势对比：两个方案分别做趋势预测，比较年度利润和回本月
+        profit_base_ready, _ = _profit_readiness(base_p)
+        profit_alt_ready, _ = _profit_readiness(alt_p)
+        if profit_base_ready and profit_alt_ready:
+            base_trend = _project_trend_12m(base_p)
+            alt_trend = _project_trend_12m(alt_p)
+            base_annual = base_trend["summary"]["total_annual_profit"]
+            alt_annual = alt_trend["summary"]["total_annual_profit"]
+            base_be = base_trend["summary"]["months_to_breakeven"]
+            alt_be = alt_trend["summary"]["months_to_breakeven"]
+            comparison["trend_comparison"] = {
+                "base_annual_profit": base_annual,
+                "alt_annual_profit": alt_annual,
+                "annual_profit_diff": round(alt_annual - base_annual, 0),
+                "base_breakeven_month": base_be,
+                "alt_breakeven_month": alt_be,
+                "breakeven_delta": (
+                    (alt_be or 99) - (base_be or 99)
+                    if alt_be is not None or base_be is not None else None
+                ),
+                "verdict_annual": (
+                    "方案B年利润更高" if alt_annual > base_annual
+                    else "方案A年利润更高" if base_annual > alt_annual
+                    else "年利润相当"
+                ),
+            }
 
         return json.dumps(comparison, ensure_ascii=False, indent=2)
 

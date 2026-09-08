@@ -54,6 +54,7 @@ let recentlyUpdatedField = null;  // F3：最近一次被成功采纳的字段�
 let currentTaskId = null, busy = false;
 let tasksCache = {};  // id → task（含 params，切任务时恢复参数状态）
 let activeCtrl = null;  // 在飞的请求控制器：切任务时 abort，避免响应错配与输入框长锁
+let _loadTasksInFlight = null;  // loadTasks 并发锁：防止多次调用导致重复渲染
 
 // ── 健康检查 ──
 function applyModelName(name) {
@@ -142,7 +143,13 @@ if (settingsBtn) settingsBtn.addEventListener('click', openModelSettings);
 
 // ── 任务管理 ──
 async function loadTasks() {
-  try { const r = await fetch('/tasks'); const tasks = await r.json(); taskList.innerHTML = '';
+  // 并发锁：如果已有 loadTasks 在执行，复用同一个 Promise 避免重复渲染
+  if (_loadTasksInFlight) return _loadTasksInFlight;
+  _loadTasksInFlight = _loadTasksInner().finally(() => { _loadTasksInFlight = null; });
+  return _loadTasksInFlight;
+}
+async function _loadTasksInner() {
+  try { const r = await fetch('/tasks'); if (!r.ok) throw new Error('HTTP ' + r.status); const tasks = await r.json(); taskList.innerHTML = '';
     tasks.forEach(t => {
       tasksCache[t.id] = t;  // 缓存含 params 的完整任务对象
       const div = document.createElement('div'); div.className = 'task-item' + (t.id === currentTaskId ? ' active' : ''); div.dataset.id = t.id;
@@ -195,24 +202,32 @@ function clearChat() {
 
 async function newTask() {
   currentTaskId = null; let ok = false;
-  try { const r = await fetch('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ name: '新任务' }) }); const t = await r.json(); currentTaskId = t.id; ok = true; } catch (e) { currentTaskId = null; }
+  try {
+    const r = await fetch('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ name: '新任务' }) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const t = await r.json(); currentTaskId = t.id; ok = true;
+  } catch (e) { console.error('[newTask] 新建任务失败:', e); currentTaskId = null; }
   if (!ok) { setToast('⚠️ 新建任务失败，请重试', '#d97706'); }
   clearChat(); activeTaskUi(); loadTasks(); input.focus();
 }
 
 async function switchTask(id) {
   // 切任务时作废在飞请求：abort + 改 currentTaskId 双保险，旧响应在 send 内被丢弃
-  if (activeCtrl) { try { activeCtrl.abort(); } catch (e) {} }
+  if (activeCtrl) { try { activeCtrl.abort(); } catch (e) { /* abort 可能抛出，忽略 */ } }
   currentTaskId = id; clearChat(); activeTaskUi();
   // 从「单一真相源」恢复本任务参数状态：有参数 → 改参/决策/对比可用，无 → 灰。
   // F2：先取缓存；若缓存缺失或为空但有消息历史，再从后端实时拉一次，避免陈旧快照
   //（此前 send() 产生参数后 tasksCache 不更新，切回时把真实参数态误判成「无参数」→ 上下文丢失）。
   await restoreTaskParams(id);
-  try { const r = await fetch('/tasks/' + id + '/messages'); const msgs = await r.json();
+  try {
+    const r = await fetch('/tasks/' + id + '/messages');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const msgs = await r.json();
     // 历史恢复不补挂「应用A/B」按钮：历史候选方案对应的 _pending_ops 已随会话失效，
     // 补挂只会产生「点击必失败」的死按钮（当前会话里没有生成过名为 A 的候选方案）。
     // 应用按钮仅在 send 实时返回 ops_available=true 时挂到当前轮消息上。
-    msgs.forEach(m => { addMessage(m.role, m.content, false, 'all'); }); } catch (e) {}
+    msgs.forEach(m => { addMessage(m.role, m.content, false, 'all'); });
+  } catch (e) { console.warn('[switchTask] 加载消息历史失败:', e.message); }
   input.focus();
 }
 
@@ -222,10 +237,12 @@ async function restoreTaskParams(id) {
   let tp = (t && t.params) || {};
   if (!t || Object.keys(tp).length === 0) {
     try {
-      const r = await fetch('/tasks'); const ts = await r.json();
+      const r = await fetch('/tasks');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const ts = await r.json();
       const fresh = ts.find(x => x.id === id);
       if (fresh) { tasksCache[id] = fresh; tp = fresh.params || {}; t = fresh; }
-    } catch (e) { }
+    } catch (e) { console.warn('[restoreTaskParams] 刷新任务缓存失败:', e.message); }
   }
   hasParams = Object.keys(tp).length > 0;
   lastParams = hasParams ? tp : null;
@@ -274,7 +291,7 @@ function taskMenu(t, div) {
     const clean = (newName || '').trim();
     if (!clean || clean === originalName) { finished = true; cleanup(); restore(); return; }
     finished = true; cleanup();   // 先上锁，避免 restore 触发的 blur 再次进入 finish
-    fetch('/tasks/' + t.id + '/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: clean }) })
+    fetch('/tasks/' + t.id + '/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ name: clean }) })
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then(() => {
         if (tasksCache[t.id]) tasksCache[t.id].name = clean;  // 同步单一真相源
@@ -307,21 +324,23 @@ async function deleteTask(t, div) {
 
 async function executeDelete(t, div) {
   const tdel = div.querySelector('.tdel');
+  if (!tdel) { console.error('[executeDelete] tdel not found'); return; }
   clearTimeout(tdel._cancelTimeout);
   try {
-    const r = await fetch('/tasks/' + t.id, { method: 'DELETE' });
-    if (!r.ok) throw new Error(String(r.status));
-    // 从缓存和 DOM 中移除
-    delete tasksCache[t.id];
-    div.remove();
-    // 如果删的是当前任务，loadTasks 会处理切换
-    if (t.id === currentTaskId) {
-      await loadTasks();
+    const r = await fetch('/tasks/' + t.id, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => r.status);
+      throw new Error('HTTP ' + r.status + ': ' + errText);
     }
+    // 从缓存中移除
+    delete tasksCache[t.id];
+    // 统一调用 loadTasks 刷新列表（无论是否当前任务，保证 UI 与服务端一致）
+    await loadTasks();
     setToast('🗑️ 已删除：' + (t.name || '未命名'), '#666');
   } catch (e) {
+    console.error('[executeDelete] 删除失败:', e);
     resetDeleteButton(tdel);
-    setToast('⚠️ 删除失败，请重试', '#d97706');
+    setToast('⚠️ 删除失败: ' + (e.message || '请重试'), '#d97706');
   }
 }
 

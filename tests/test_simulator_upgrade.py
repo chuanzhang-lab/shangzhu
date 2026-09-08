@@ -1,0 +1,373 @@
+"""模拟器升级测试 — 覆盖 P0-P1 全部新增功能。
+
+测试模块：
+- S1: 用户指定多期收入序列
+- S2: NPV/IRR 接入 quick_scan
+- S3: 动态跑道
+- S4: 参数阶梯依赖
+- S5: 多期场景对比
+"""
+import json
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from tools.workflow_engine import (
+    _project_trend_12m,
+    _apply_step_rules,
+    _fill_and_assess,
+    compare_scenarios,
+    quick_scan,
+)
+
+
+# ─── S1: 收入序列支持 ─────────────────────────────────────────────────────
+
+class TestRevenueSeries:
+    """S1: monthly_revenue 支持数组输入。"""
+
+    def test_single_value_mode(self):
+        """单值模式：原有逻辑不变。"""
+        params = {
+            "monthly_revenue": 30000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "monthly_growth_rate": 0.1,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        assert result["input_mode"] == "growth_rate"
+        assert result["months_count"] == 12
+        assert len(result["months"]) == 12
+        # 增长率 10%，第1月应有季节因子 0.85
+        assert result["months"][0]["revenue"] == round(30000 * 0.85, 0)
+
+    def test_series_mode_basic(self):
+        """收入序列模式：5 期序列，默认延续到 12 期。"""
+        params = {
+            "monthly_revenue": [30000, 45000, 60000, 75000, 90000],
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        assert result["input_mode"] == "series"
+        assert result["months_count"] == 12  # 默认延续到 12 期
+        assert len(result["months"]) == 12
+        # 前 5 期使用用户序列值
+        assert result["months"][0]["revenue"] == round(30000 * 0.85, 0)
+        assert result["months"][4]["revenue"] == round(90000 * 1.05, 0)
+
+    def test_series_mode_first_value(self):
+        """收入序列：第一个值应正确。"""
+        params = {
+            "monthly_revenue": [30000, 45000, 60000],
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        # 第1月收入 = 30000 * seasonal(1月=0.85) = 25500
+        assert result["months"][0]["revenue"] == 25500.0
+
+    def test_series_with_post_growth(self):
+        """收入序列：序列用完后按 growth_rate 延续。"""
+        params = {
+            "monthly_revenue": [30000, 45000],
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "monthly_growth_rate": 0.1,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        # 第3月：45000 * (1+0.1)^1 * seasonal(3月=1.0) = 49500
+        assert result["months"][2]["revenue"] == round(45000 * 1.1 * 1.0, 0)
+
+    def test_custom_analysis_months(self):
+        """analysis_months 参数生效。"""
+        params = {
+            "monthly_revenue": 30000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "analysis_months": 6,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        assert result["months_count"] == 6
+        assert len(result["months"]) == 6
+
+
+# ─── S2: NPV/IRR 接入 ────────────────────────────────────────────────────
+
+class TestInvestmentMetrics:
+    """S2: quick_scan 输出含 investment_metrics。"""
+
+    def test_npv_irr_in_trend(self):
+        """有总投资时，趋势预测含 NPV/IRR。"""
+        params = {
+            "monthly_revenue": 30000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "monthly_growth_rate": 0.05,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        assert "investment_metrics" in result
+        im = result["investment_metrics"]
+        assert "npv_8pct" in im
+        assert "irr" in im
+        assert "irr_percent" in im
+        assert im["discount_rate"] == "8%"
+
+    def test_npv_irr_with_series(self):
+        """收入序列模式也含 NPV/IRR。"""
+        params = {
+            "monthly_revenue": [30000, 45000, 60000, 75000, 90000],
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        assert "investment_metrics" in result
+
+
+# ─── S3: 动态跑道 ─────────────────────────────────────────────────────────
+
+class TestDynamicRunway:
+    """S3: 动态跑道（趋势感知）。"""
+
+    def test_dynamic_runway_present(self):
+        """有可用现金时，趋势预测含 dynamic_runway。"""
+        params = {
+            "monthly_revenue": 30000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        assert "dynamic_runway" in result
+        dr = result["dynamic_runway"]
+        assert "runway_months" in dr
+        assert "runway_label" in dr
+        assert "min_cash" in dr
+        assert "min_cash_month" in dr
+
+    def test_dynamic_runway_exhaustion(self):
+        """现金耗尽时，runway_months 应为具体月数。"""
+        params = {
+            "monthly_revenue": 10000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 5000,  # 很少现金
+            "total_investment": 5000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        dr = result["dynamic_runway"]
+        # 月亏损 = 10000*0.85 - 15000 - 10000*0.85*0.4 = 8500 - 15000 - 3400 = -9900
+        # 现金 5000，第1个月就耗尽
+        assert dr["runway_months"] is not None
+        assert dr["runway_months"] <= 1
+
+    def test_dynamic_runway_not_exhausted(self):
+        """现金充足时，runway_months 为 None。"""
+        params = {
+            "monthly_revenue": 50000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 500000,
+            "total_investment": 500000,
+            "industry_name": "餐饮",
+        }
+        result = _project_trend_12m(params)
+        dr = result["dynamic_runway"]
+        assert dr["runway_months"] is None  # 未耗尽
+        assert ">" in dr["runway_label"]
+
+
+# ─── S4: 参数阶梯依赖 ────────────────────────────────────────────────────
+
+class TestStepRules:
+    """S4: 参数阶梯依赖。"""
+
+    def test_revenue_triggers_employee(self):
+        """月营收 12 万 → 员工数应升为 5。"""
+        params = {"monthly_revenue": 120000}
+        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失] 未提供"}
+        params, src, changes = _apply_step_rules(params, src)
+        assert params["employee_count"] == 5
+        assert "employee_count" in changes
+        assert "[阶梯]" in src["employee_count"]
+
+    def test_employee_triggers_rent(self):
+        """员工数 5 → 租金应升为 8000。"""
+        params = {"monthly_revenue": 120000}
+        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失] 未提供",
+               "monthly_rent": "[缺失] 未提供"}
+        params, src, changes = _apply_step_rules(params, src)
+        assert params["monthly_rent"] == 8000
+        assert "monthly_rent" in changes
+
+    def test_user_value_not_overridden(self):
+        """用户显式值不被阶梯规则覆盖。"""
+        params = {"monthly_revenue": 120000, "employee_count": 10}
+        src = {"monthly_revenue": "[用户]", "employee_count": "[用户] 10人"}
+        params, src, changes = _apply_step_rules(params, src)
+        assert params["employee_count"] == 10  # 不被覆盖
+        assert "employee_count" not in changes
+
+    def test_low_revenue(self):
+        """低营收（<5万）→ 员工数 2。"""
+        params = {"monthly_revenue": 30000}
+        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失]"}
+        params, src, changes = _apply_step_rules(params, src)
+        assert params["employee_count"] == 2
+
+    def test_high_revenue(self):
+        """高营收（>50万）→ 员工数 12，租金 20000。"""
+        params = {"monthly_revenue": 600000}
+        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失]",
+               "monthly_rent": "[缺失]"}
+        params, src, changes = _apply_step_rules(params, src)
+        assert params["employee_count"] == 12
+        assert params["monthly_rent"] == 20000
+
+    def test_no_rules_no_change(self):
+        """无触发条件时不变化。"""
+        params = {"monthly_revenue": None}
+        src = {"monthly_revenue": "[缺失]"}
+        params, src, changes = _apply_step_rules(params, src)
+        assert changes == []
+
+
+# ─── S5: 多期场景对比 ────────────────────────────────────────────────────
+
+class TestMultiPeriodComparison:
+    """S5: compare_scenarios 含趋势对比。"""
+
+    def test_trend_comparison_present(self):
+        """两个方案都有完整参数时，含 trend_comparison。"""
+        base = json.dumps({
+            "monthly_revenue": 50000,
+            "monthly_fixed_cost": 15000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 200000,
+            "total_investment": 200000,
+            "monthly_rent": 8000,
+            "employee_count": 3,
+            "avg_salary": 5000,
+            "price_per_unit": 25,
+            "daily_traffic": 100,
+            "industry_name": "餐饮",
+        })
+        alt = json.dumps({
+            "monthly_revenue": 80000,
+            "monthly_fixed_cost": 25000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 300000,
+            "total_investment": 300000,
+            "monthly_rent": 15000,
+            "employee_count": 5,
+            "avg_salary": 5000,
+            "price_per_unit": 25,
+            "daily_traffic": 160,
+            "industry_name": "餐饮",
+        })
+        result = json.loads(compare_scenarios.invoke({"base_json": base, "alt_json": alt}))
+        assert "trend_comparison" in result
+        tc = result["trend_comparison"]
+        assert "base_annual_profit" in tc
+        assert "alt_annual_profit" in tc
+        assert "annual_profit_diff" in tc
+        assert "base_breakeven_month" in tc
+        assert "alt_breakeven_month" in tc
+        assert "verdict_annual" in tc
+
+    def test_trend_comparison_verdict(self):
+        """高营收方案应有更高的年利润。"""
+        base = json.dumps({
+            "monthly_revenue": 30000,
+            "monthly_fixed_cost": 10000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 100000,
+            "total_investment": 100000,
+            "price_per_unit": 25,
+            "daily_traffic": 60,
+            "industry_name": "餐饮",
+        })
+        alt = json.dumps({
+            "monthly_revenue": 60000,
+            "monthly_fixed_cost": 20000,
+            "variable_cost_ratio": 0.4,
+            "available_cash": 200000,
+            "total_investment": 200000,
+            "price_per_unit": 25,
+            "daily_traffic": 120,
+            "industry_name": "餐饮",
+        })
+        result = json.loads(compare_scenarios.invoke({"base_json": base, "alt_json": alt}))
+        tc = result["trend_comparison"]
+        assert tc["alt_annual_profit"] > tc["base_annual_profit"]
+        assert tc["annual_profit_diff"] > 0
+        assert "方案B" in tc["verdict_annual"]
+
+
+# ─── 集成测试：quick_scan 含趋势数据 ──────────────────────────────────────
+
+class TestQuickScanIntegration:
+    """quick_scan 输出含 trend / investment_metrics / dynamic_runway。"""
+
+    def test_quick_scan_with_growth_rate(self):
+        """quick_scan 正常模式含趋势数据。"""
+        result = json.loads(quick_scan.invoke({
+            "params_json": json.dumps({
+                "monthly_revenue": 50000,
+                "monthly_fixed_cost": 15000,
+                "variable_cost_ratio": 0.4,
+                "monthly_growth_rate": 0.05,
+                "available_cash": 200000,
+                "total_investment": 200000,
+                "price_per_unit": 25,
+                "daily_traffic": 100,
+                "industry_name": "餐饮",
+            })
+        }))
+        assert "trend" in result
+        assert "investment_metrics" in result
+        assert "dynamic_runway" in result
+        assert result["trend"]["input_mode"] == "growth_rate"
+
+    def test_quick_scan_with_revenue_series(self):
+        """quick_scan 收入序列模式。"""
+        result = json.loads(quick_scan.invoke({
+            "params_json": json.dumps({
+                "monthly_revenue": [30000, 45000, 60000, 75000, 90000],
+                "monthly_fixed_cost": 15000,
+                "variable_cost_ratio": 0.4,
+                "available_cash": 200000,
+                "total_investment": 200000,
+                "price_per_unit": 25,
+                "daily_traffic": 100,
+                "industry_name": "餐饮",
+            })
+        }))
+        assert "trend" in result
+        assert result["trend"]["input_mode"] == "series"
+        assert result["trend"]["months_count"] == 12  # 序列延续到 12 期

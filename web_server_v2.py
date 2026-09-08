@@ -23,6 +23,73 @@ import sys
 # 关键：本守卫**只能**在 __name__ == "__main__" 时执行。若 web_server 被当作
 #    模块 import（如 TestClient 测试、p49 测试），绝不能触发 execv——否则会把
 #    测试进程劫持成 uvicorn 服务并永久卡死（这就是 P4-9 守护测试一度被回退的根因）。
+
+
+# ─── Checkpoint API（S5：会话参数快照与回退）─────────────────────────────
+
+@app.post("/checkpoint")
+async def save_checkpoint_api(req: dict):
+    """保存当前任务参数快照。
+
+    请求体: {"task_id": "xxx", "label": "高成本率假设"}
+    返回: {"id": "cp_1", "label": "...", "timestamp": 1234567890, "param_count": 15}
+    """
+    from checkpoint import save_checkpoint
+    task_id = req.get("task_id", "")
+    label = req.get("label", "")
+    if not task_id:
+        return {"error": "缺少 task_id"}
+    # 从 SessionState 获取当前参数
+    from session_state import get_state
+    st = get_state(task_id)
+    result = save_checkpoint(task_id, st["params"], label)
+    return result
+
+
+@app.get("/checkpoints/{task_id}")
+async def list_checkpoints_api(task_id: str):
+    """列出指定任务的所有快照。
+
+    返回: [{"id": "cp_1", "label": "...", "timestamp": 1234567890, "param_count": 15}, ...]
+    """
+    from checkpoint import list_checkpoints
+    return list_checkpoints(task_id)
+
+
+@app.post("/rollback")
+async def rollback_api(req: dict):
+    """回退到指定快照。
+
+    请求体: {"task_id": "xxx", "checkpoint_id": "cp_1"}
+    返回: {"success": true, "params": {...}} 或 {"error": "快照不存在"}
+    """
+    from checkpoint import rollback_to
+    from session_state import get_state
+    task_id = req.get("task_id", "")
+    checkpoint_id = req.get("checkpoint_id", "")
+    if not task_id or not checkpoint_id:
+        return {"error": "缺少 task_id 或 checkpoint_id"}
+    params = rollback_to(task_id, checkpoint_id)
+    if params is None:
+        return {"error": f"快照 {checkpoint_id} 不存在"}
+    # 写回 SessionState
+    st = get_state(task_id)
+    st["params"] = params
+    return {"success": True, "params": params}
+
+
+@app.delete("/checkpoints/{task_id}")
+async def clear_checkpoints_api(task_id: str):
+    """清除指定任务的所有快照。
+
+    返回: {"cleared": 3}
+    """
+    from checkpoint import clear_checkpoints
+    count = clear_checkpoints(task_id)
+    return {"cleared": count}
+
+
+
 if __name__ == "__main__":
     _VENV_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python3")
     if (
