@@ -1,5 +1,7 @@
 # 创业者商业建模工作台
 
+**版本：v0.1.0** — 本版本将大模型设为交互助手并添加了功能 `aab3a12`
+
 把早期创业者的稀疏 / 未知参数，从「算出一个确定性答案」转变为「说清我们知道什么、猜了什么、缺什么」。薄规则引擎（0 次 LLM 调用业务意图）+ 置信层（来源标注 `[用户]/[默认]/[推算]/[缺失]`）+ 只读 LLM 协作层（Engine Steward）。
 
 ## 交付边界（重要）
@@ -67,7 +69,7 @@ make start     # 等价 ./start.sh -p 8000
 - **交互状态可观测（F5）**：导出前校验参数完整性（缺营收/变动成本/固定成本则提示并拦截）；新建任务失败给红字反馈；任务改名带成功/失败 toast。
 
 ## 配置
-- 模型：`mimo-v2.5-pro`（**单源**：`config/agent_llm_config.json` 的 `config.model`；代码 fallback 为 `deepseek-v4-flash`）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。
+- 模型：**单源**为 `config/agent_llm_config.json` 的 `config.model`（`base_url` / `api_key` 同在此文件，三者同源以避免跨厂商错配）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。该文件被 gitignore，**README 不写死具体模型名**（否则换模型必漂移），本地实际值以上述配置文件为准；代码层 fallback 默认值见 `config/settings.py` 与 `src/llm_advisor.py`。
 - 数据库：默认 `postgresql://newmacbook@localhost:5432/shangzhu`。可通过以下方式覆盖：
   - 环境变量 `PGDATABASE_URL`（最高优先级）
   - `config/storage.json` 中的 `db_url` 字段（中等优先级，文件被 gitignore）
