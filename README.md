@@ -11,27 +11,76 @@
 - **(A) 本地独立工作台（本仓交付）**：`web_server.py` 规则引擎 + Engine Steward。业务意图 0 次 LLM 调用；chitchat/闲聊走**已接入的 Engine Steward（只读、接地真实项目背景）**，不引入自由 agent，从设计上杜绝编造未出现的具体数字。含任务栏与会话持久化（本机 PostgreSQL）。前端为**方案二「分类对话工作台」**：5 个分类标签（全部/分析/改参/决策/对比）作过滤器、按分类分草稿、空项目自动灰化、右侧只读参数面板，CSS/JS 位于 `src/web_static/`。
 - **(B) Coze 平台服务（已从本仓移除）**：原 `src/main.py` LangGraph agent 循环及 `storage/*`（sqlalchemy/boto3/cozeloop 等）为 Coze 平台专用路径，2026-08-01 清理——本地 web_server 与其零耦合，也不再交付这些重型依赖。
 
-## 快速启动
+## 一键启动（推荐）
+
+**无需关心当前目录。从仓库根目录或 `~` 直接跑都行**——`setup.sh` 会自动切到脚本所在目录。
+
+### 方案一：完整 Clone（推荐，留项目文件）
 
 ```bash
-# 1. 安装 uv（如未安装）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. 创建虚拟环境并安装依赖（首次运行）
-uv sync
-
-# 3. 设置 API key（可选；未设置时 Engine Steward 静默跳过，规则引擎照常工作）
-export DEEPSEEK_API_KEY="your-key"
-
-# 4. 初始化本地数据库（会话/任务持久化，首次运行或表缺失时）
-.venv/bin/python3 scripts/init_db.py
-
-# 5. 启动本地服务
-./start.sh -p 8000
+git clone https://github.com/chuanzhang-lab/claude.git && cd claude && bash setup.sh
 ```
 
-> `start.sh` 会自动检测 `.venv`；若不存在且已安装 `uv`，会先执行 `uv sync`。
-> 会话/任务持久化依赖本机 PostgreSQL（默认 `localhost:5432/shangzhu`，可用环境变量 `PGDATABASE_URL` 覆盖）。PG 不可用时自动降级为进程内内存存储，服务不崩。
+效果：完整克隆到本地，可继续开发使用。
+
+### 方案二：gh CLI 克隆（私有仓库推荐）
+
+```bash
+gh repo clone chuanzhang-lab/claude && cd claude && bash setup.sh
+```
+
+`gh` 已登录时会自动处理认证，比裸 `git clone` 省事（本仓是私有仓库，见下方注意事项）。
+
+### `setup.sh` 自动完成
+
+1. 切到脚本所在目录（解决"找不到文件"问题）
+2. 安装依赖（`uv sync`；检测不到 `uv` 时自动安装）
+3. 生成 `config/agent_llm_config.json` 与 `config/storage.json`（两者被 gitignore，新克隆必然缺失）
+4. 导入冒烟（提前暴露依赖问题，不半途启动）
+5. 初始化 PostgreSQL（**可选**：检测不到 PG 时跳过，服务自动降级内存存储，不崩）
+6. 跑测试（**270 passed**）
+
+### 可选参数
+
+```bash
+bash setup.sh            # 完整初始化 + 跑测试（首次推荐）
+bash setup.sh --start    # 上述全部 + 结束后直接启动服务
+bash setup.sh --no-test  # 只做环境准备，跳过测试
+```
+
+### 适用场景
+
+| 场景 | 推荐做法 |
+|------|----------|
+| 第一次使用 | 方案一（留项目文件） |
+| 只想验证环境是否 OK | `bash setup.sh --no-test` |
+| 装完直接跑起来 | `bash setup.sh --start` |
+
+> ⚠️ **注意事项**
+> - 本仓库为**私有仓库**，未认证时 `git clone` 会失败。请先 `gh auth login`，或直接用方案二。
+> - 私有仓库**不支持** `curl raw.githubusercontent.com … | bash` 一行式安装（会返回 404），请用上面的克隆方式。
+> - 依赖由 `uv` + `pyproject.toml` 管理，**没有 `requirements.txt`**。
+> - 首次使用请先克隆、本地审阅后再执行，不要直接 `curl | bash`（供应链风险）。
+
+## 手动启动（已克隆 / 已有项目目录）
+
+```bash
+# 1. 安装依赖（首次）
+uv sync
+
+# 2. 配置模型（可选；未配置时规则引擎照常工作，AI 解读自动跳过）
+#    编辑 config/agent_llm_config.json 填入 model / base_url / api_key
+#    或启动后直接在网页右上角的设置入口里填写
+
+# 3. 初始化数据库（可选，会话/任务持久化用）
+.venv/bin/python3 scripts/init_db.py
+
+# 4. 启动服务（默认端口 8081）
+./start.sh
+# 换端口：PORT=8000 ./start.sh   （注意：不是 -p 参数）
+```
+
+> 会话/任务持久化依赖本机 PostgreSQL（默认 `localhost:5432/shangzhu`，可用 `PGDATABASE_URL` 覆盖）。PG 不可用时自动降级为进程内内存存储，服务不崩，但重启后会话丢失。
 
 启动后：
 - `GET  /health` 健康检查（返回 `status` / `model` / `version` / `uptime_seconds` / `llm_configured` / `sessions` / `store_backend`）

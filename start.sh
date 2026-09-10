@@ -9,11 +9,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-# 优先使用项目自带 .venv（uv sync 重建过，含全部依赖）；
-# 若缺失（如旧机器上 .venv 是软链到 WPS Python 缺 uvicorn），回退到 fangan1 的 venv。
+# 优先使用项目自带 .venv（uv sync 生成，含全部依赖）。
+# 备用解释器通过环境变量 SHANGZHU_FALLBACK_PY 指定——不把个人绝对路径写死在仓库里，
+# 否则克隆到其他机器时会指向一个不存在的路径（一键克隆的可移植性要求）。
 VENV_PY="$SCRIPT_DIR/.venv/bin/python3"
-if [ ! -x "$VENV_PY" ]; then
-    VENV_PY="/Users/newmacbook/Desktop/pangdekuan/fangan1/.venv/bin/python3"
+if [ ! -x "$VENV_PY" ] && [ -n "${SHANGZHU_FALLBACK_PY:-}" ] && [ -x "${SHANGZHU_FALLBACK_PY:-}" ]; then
+    VENV_PY="$SHANGZHU_FALLBACK_PY"
 fi
 LOG="$SCRIPT_DIR/logs/shangzhu.log"
 PORT="${PORT:-8081}"
@@ -21,7 +22,8 @@ PORT="${PORT:-8081}"
 mkdir -p logs output
 
 if [ ! -x "$VENV_PY" ]; then
-    echo "[start] 错误：venv Python 不存在: $VENV_PY" >&2
+    echo "[start] 错误：未找到可用的 venv Python: $VENV_PY" >&2
+    echo "[start] 请先运行 ./setup.sh 初始化环境（会自动 uv sync 生成 .venv）" >&2
     exit 1
 fi
 
