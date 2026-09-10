@@ -607,12 +607,16 @@ def test_p49_health_and_footer_single_source():
         assert model in html, "页脚未注入真实模型名"
         assert "__MODEL_NAME__" not in html, "页脚占位符未被替换"
         # 4) 源码不得硬编码模型名（去除注释行后再查，允许说明性注释提及）
-        ws_path = os.path.join(os.path.dirname(__file__), "..", "web_server.py")
-        code = "\n".join(
-            ln for ln in open(ws_path, encoding="utf-8").read().splitlines()
-            if not ln.lstrip().startswith("#")
-        )
-        assert model not in code, "web_server 出现硬编码模型名，破坏配置单源"
+        #    注意：model 为空（全新克隆尚未配置模型）时 `"" in code` 恒为 True，
+        #    会造成误报失败。本护栏要防的是「已配置模型名却仍硬编码在源码里」，
+        #    未配置时该检查无意义，故仅在 model 非空时执行。
+        if model:
+            ws_path = os.path.join(os.path.dirname(__file__), "..", "web_server.py")
+            code = "\n".join(
+                ln for ln in open(ws_path, encoding="utf-8").read().splitlines()
+                if not ln.lstrip().startswith("#")
+            )
+            assert model not in code, "web_server 出现硬编码模型名，破坏配置单源"
     finally:
         os.chdir(saved_cwd)
 
