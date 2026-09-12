@@ -182,14 +182,24 @@ op_executor 草案。**抽取器已能处理精确改参（如「人工改为2*3
 ## 6. 数据流与函数地图
 
 ```
-用户输入 (params_json)
-   → _fill_params()          填充 + 标注 source + 缺失传播
-   → _fill_and_assess()      门禁 + conf + assumptions + framework          [④]
-   → (insufficient?) → 骨架响应
-   → _build_scenarios()      情景区间                                      [③]
-   → _build_narrative()      风险聚焦                                      [⑤]
-   → format_response()       渲染（骨架 / 仪表盘 / 情景 / 叙事）            formatter.py
+用户输入（自然语言）
+   → detect_intent()          意图路由（业务意图 / chitchat）                router/intent.py
+   → extract_params()         抽取器：自然语言 → params + source            router/param_extractor.py
+   ───────────────────────── 契约边界：params: dict + param_sources ─────────────────────────
+   → apply_turn_guarded()     跨轮 merge + 守门                            session_state.py
+   → quick_scan()             计算引擎入口                                 workflow_engine.py
+        → _fill_params()          填充 + 标注 source + 缺失传播
+        → _fill_and_assess()      门禁 + conf + assumptions + framework          [④]
+        → (insufficient?) → 骨架响应
+        → _build_scenarios()      情景区间                                      [③]
+        → _build_narrative()      风险聚焦                                      [⑤]
+   → format_response()        渲染（骨架 / 仪表盘 / 情景 / 叙事）            router/formatter.py
 ```
+
+> **抽取器与计算引擎的边界**：抽取器只做「语言 → 数据」，计算引擎只做「数据 → 结果」，
+> 二者之间只传 `params` 与来源标注，互不越界。因此两类缺陷的定位方式不同：
+> 抽取器缺陷改同义词 / 量词 / 正则（测试是「措辞 → 参数字典」oracle）；
+> 计算引擎缺陷改 `field_model` 公式 / 模板默认值（测试是「参数字典 → 数值」oracle）。
 
 | 文件 | 职责 |
 |------|------|
@@ -202,11 +212,12 @@ op_executor 草案。**抽取器已能处理精确改参（如「人工改为2*3
 | `src/decision_engine.py` | L2 决策引擎：`build_evidence`(证据包+basis) / `decide`(选项+排序+否决+定稿) / `render_decision` / `forbidden_tone_scan`(倾向词硬守卫) / `recommend_first_validation`(一次性验证建议) |
 | `src/router/formatter.py` | 渲染：`_fmt_scan` / `_fmt_insufficient` / `_fmt_trend` / `_fmt_compare` / `_fmt_decision` |
 | `src/llm_advisor.py` | LLM 协作层：`_SYSTEM`(翻译+编排) + `_SYSTEM_DECISION`(决策解说员，严禁倾向/判决) + `advise`（**只读数据、绝不改写引擎数据**；失败/无 key 返回空） |
-| `src/router/intent.py` | 意图路由：`decide` 意图（85 优先级）+ `decide_type_of`（该不该开/继续/撑多久/先验证 → decision_type 子路由） |
+| `src/router/param_extractor.py` | **抽取器（自然语言 → 结构化参数）**：`extract_params()` 把用户口语句解析为 params dict + 来源标注。**属上游输入理解层，不是计算引擎**——只做语言解析，不做任何算术；与计算引擎之间以 `params: dict + param_sources` 为契约边界。措辞覆盖（同义词 / 量词 / 中文「成」/ 毛利率换算）是它的独立回归面 |
+| `src/router/intent.py` | 意图路由：`detect_intent`（业务意图 / chitchat 分流）+ `decide` 意图（85 优先级）+ `decide_type_of`（该不该开/继续/撑多久/先验证 → decision_type 子路由）+ `_looks_like_param_update`（纯补参句兜底，防误判 chitchat 丢参数） |
 | `src/param_guard.py` | 参数守门层：`FIELD_CONSTRAINTS` / `normalize_value` / `validate_field` / `validate_params` / `guard_extracted` / `guard_merge` / `check_derived_consistency` + **basis 分类** `classify_basis` / `derive_basis_map`（USER/MISSING/HYPOTHESIS） |
 | `src/op_executor.py` | Tier 1 编排执行器：`BASE_FIELDS`/`DERIVED_FIELDS`（白/黑名单）/ `validate_op` / `preview_op` / `apply_op`（含 hypothesis 登记）/ `parse_apply_command` |
 | `src/session_state.py` | 跨轮 `apply_turn_guarded` 守门合并 / `_compute_param_diff` 本轮变更 / `to_llm_view` 清洁视图 / **`_accepted_hypotheses`**（已采纳假设登记，P0） |
-| `tests/run_all.py` | 统一测试入口（Phase 0/1/2/3/4 全量回归 + 健壮性/模板覆盖；以 `run_all.py` 输出为准） |
+| `tests/run_all.py` | **后备测试运行器**（无 pytest 环境时使用）：手工收集模块级函数 + `class Test*` 方法，需 pytest fixture 的用例显式记为 `SKIP`。**交付门禁是 `make test`（pytest 全量），不是本脚本** |
 
 ---
 
@@ -263,7 +274,7 @@ messages: id BIGSERIAL PK | task_id UUID FK→tasks(id) ON DELETE CASCADE
 
 - 存储层单测：`tests/test_local_store.py`（MemoryStore 契约 + PostgresStore 端到端，PG 不在则跳过）。
 - API 契约：`tests/test_task_api.py`（TestClient + 内存 store 隔离，不污染真实 PG）。
-- 全量回归：`tests/run_all.py`（195 用例，含原 183）。
+- 全量回归：`make test`（= pytest 全量收集 `tests/` 全部 33 个文件，当前 **355 passed / 0 failed**）。
 - 端到端已验证：双任务独立上下文；跨轮 merge；重启服务后历史保留。
 
 ---
@@ -271,10 +282,14 @@ messages: id BIGSERIAL PK | task_id UUID FK→tasks(id) ON DELETE CASCADE
 ## 9. 验证
 
 ```bash
-.venv/bin/python3 tests/run_all.py    # 全量回归（以终端输出为准）
-# 或
-make test
+make test        # 交付门禁：pytest 全量收集 tests/（当前 355 passed / 0 failed）
+# 后备（无 pytest 环境）：.venv/bin/python3 tests/run_all.py
+#   → 331 passed + 24 skipped（需 pytest fixture 的用例显式跳过，不计入通过）
 ```
+
+> 历史教训：`tests/run_all.py` 曾用 `vars(mod)` 只扫**模块级**函数，`class TestXxx` 内的用例
+> 即使被 import 也永远收集不到 → 曾长期呈现「25/33 文件、270 passed」的**假绿灯**。
+> 故门禁已统一为 pytest 全量，`run_all.py` 降级为后备。
 
 用例覆盖：Phase 0 置信层/门禁、Phase 1 情景/叙事、Phase 2 Engine Steward、Phase 3 跨轮 SessionState（含 TTL/上限/raw_text 截断）、Phase 4 工作台一体化与解耦守护、FinancialCalculator/Formatter 单测、WebServer 健壮性（含并发与 health 可观测字段）、12 行业模板保本覆盖、ParamGuard 参数守门层（比例归一化/硬软边界/历史矛盾/「人工3500*2」「6000%」全链路）。
 
