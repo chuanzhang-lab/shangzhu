@@ -68,6 +68,7 @@ import test_industry_seasonal as t29
 import test_llm_settings as t30
 import test_simulator_upgrade as t31
 import test_vc_consistency as t32
+import test_extractor_coverage as t33
 
 
 def _bind(cls, fn):
