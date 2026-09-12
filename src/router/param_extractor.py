@@ -185,19 +185,18 @@ def _parse_number(raw: str) -> Optional[float]:
     if cn is not None:
         return -cn if negative else cn
 
-    # 万
-    for unit in ["万", "w", "W"]:
+    # 万 / 千：口语缩写「1万5」= 15000、「1千5」= 1500（尾数按「单位/10」计）
+    # E4 修复：旧实现只取 `\d+` 第一段，把「1万5」算成 10000 —— 丢尾数是**静默算错**。
+    for unit, scale in (("万", 10000), ("w", 10000), ("W", 10000),
+                        ("千", 1000), ("k", 1000), ("K", 1000)):
         if unit in raw:
-            num = re.search(r"\d+(?:\.\d+)?", raw)
-            if num:
-                val = float(num.group(0)) * 10000
+            m_abbr = re.match(rf"^(\d+(?:\.\d+)?)\s*{unit}\s*(\d)", raw)
+            if m_abbr:
+                val = float(m_abbr.group(1)) * scale + float(m_abbr.group(2)) * (scale // 10)
                 return -val if negative else val
-    # 千
-    for unit in ["千", "k", "K"]:
-        if unit in raw:
             num = re.search(r"\d+(?:\.\d+)?", raw)
             if num:
-                val = float(num.group(0)) * 1000
+                val = float(num.group(0)) * scale
                 return -val if negative else val
     # 普通数字
     num = re.search(r"\d+(?:\.\d+)?", raw)
@@ -470,6 +469,24 @@ def _find_number(text: str, units, strict: bool = False,
         negative = True
         text = text[1:].strip()  # 剥离负号前缀，后续正则只处理纯数字
 
+    # 0. 中文金额缩写「A万B / A千B」（E4 修复：「1万5」→15000，旧实现丢尾数得 10000）
+    #    仅当请求的单位含 万/千 时启用；尾数后不得紧跟量词/时间词，
+    #    否则「月租2万5人」的 5（人数）会被吞进金额。
+    if units:
+        units_list = units if isinstance(units, list) else [units]
+        for u in ("万", "千"):
+            if u not in units_list:
+                continue
+            m = re.search(
+                rf"(\d+(?:\.\d+)?\s*{u})(\d)"
+                r"(?!\s*[人个位名杯碗份件瓶只条张袋盒串盘年月天日])",
+                text,
+            )
+            if m:
+                val = _parse_number(m.group(1) + m.group(2))
+                if val is not None:
+                    return -val if negative else val
+
     # 1. 带单位的数字
     if units:
         units_list = units if isinstance(units, list) else [units]
@@ -601,8 +618,13 @@ def _extract_cost_ratio(text: str, params: dict) -> None:
     if params.get("variable_cost_ratio") is not None:
         return
     pats = [
-        r"(?:食材|原料|材料|变动|运营)?成本占(?:营业额|营收|收入)\s*(-?\d+(?:\.\d+)?)\s*%?",
-        r"成本率\s*(?:为|是|到|改成|改为)?\s*(-?\d+(?:\.\d+)?)\s*%?",
+        # E1 修复（2026-09-12）：对象词「营业额/营收/收入」改为**可省略**——
+        # 「食材成本占40%」是口语里最自然的说法，旧实现要求显式对象词而漏抽。
+        # 负向断言排除「固定成本占…」「总成本占…」：那是**固定成本占比**，
+        # 不是变动成本率（不能把「月固定成本占40%」算成 vcr=0.4）。
+        r"(?<!固定)(?<!总)(?:食材|原料|材料|变动|可变|运营)?成本占"
+        r"(?:(?:营业额|营收|收入)\s*)?(-?\d+(?:\.\d+)?)\s*(?!成)%?",
+        r"成本率\s*(?:为|是|到|改成|改为)?\s*(-?\d+(?:\.\d+)?)\s*(?!成)%?",
         # F1：变动成本/可变成本 + 明确比例语义（含「改为/改成/为/是/到」等动词，
         # 后面直接跟 0~100 的百分数）→ 归一化为 ratio。避免误抓「每份成本 45 元」。
         r"(?:变动成本率|可变成本率|变动成本|可变成本)\s*(?:为|是|到|改成|改为|变成)?\s*(-?\d{1,3}(?:\.\d+)?)\s*%",
@@ -613,6 +635,108 @@ def _extract_cost_ratio(text: str, params: dict) -> None:
             val = float(m.group(1))
             if 0 < abs(val) < 100:           # 百分数（0<|v|<100），归一化；极小/极大视为噪声
                 params["variable_cost_ratio"] = val / 100  # 保留符号
+            return
+
+
+# ── E2：中文分数「X成」────────────────────────────────────────────────────
+# 计量单位的量词（供 E3/E5 的独立正则使用，不进 _FIELD_PATTERNS 的 keyword 列表）
+_QUANTIFIERS = "碗|杯|份|位|件|瓶|个|只|条|张|袋|盒|串|盘"
+
+_CN_FRACTION_DIGIT = {
+    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+
+
+def _cn_fraction_ratio(raw: str) -> Optional[float]:
+    """「X成」的 X → 比例 0~1（十成 = 1.0；>10 视为噪声返回 None）。"""
+    if raw in _CN_FRACTION_DIGIT:
+        return _CN_FRACTION_DIGIT[raw] / 10.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return None
+    return v / 10.0 if 0 < v <= 10 else None
+
+
+def _extract_cn_fraction(text: str, params: dict) -> None:
+    """中文分数「X成」→ 0.1×X（E2 修复）。
+
+    旧行为是**静默算错**（比漏抽更危险）：
+    - 「食材成本占4成」→ 通用字段兜底把「4」当阿拉伯数字 → guard 归一 0.04（差 10 倍）
+    - 「毛利率六成」→ 0.06
+
+    语义绑定（避免误伤「完成 / 成员 / 成为」里的「成」）：
+    - 变动成本率侧：必须紧邻「成本」（可前置 食材/原料/材料/变动/可变/运营），
+      且「成」后不得紧跟「本」。
+    - 毛利率侧：必须紧邻「毛利 / 毛利率 / 毛利润率」（前置或后置）。
+    """
+    num = r"(\d+(?:\.\d+)?|[一二两三四五六七八九十])"
+
+    if params.get("variable_cost_ratio") is None:
+        m = re.search(
+            r"(?<!固定)(?<!总)(?:食材|原料|材料|变动|可变|运营)?成本"
+            r"(?:占|为|是|到)?\s*(?:(?:营业额|营收|收入)\s*)?" + num + r"\s*成(?!本)",
+            text,
+        )
+        if m:
+            ratio = _cn_fraction_ratio(m.group(1))
+            if ratio is not None:
+                params["variable_cost_ratio"] = ratio
+
+    # 毛利率侧：通用字段会把「六成」抽成 6 → guard 归一 0.06，故此处必须**覆盖**。
+    m = re.search(
+        r"(?:毛利率|毛利润率|毛利)\s*(?:为|是|有|到)?\s*" + num + r"\s*成", text)
+    if not m:
+        m = re.search(
+            num + r"\s*成\s*(?:的)?\s*(?:毛利率|毛利润率|毛利)", text)
+    if m:
+        ratio = _cn_fraction_ratio(m.group(1))
+        if ratio is not None:
+            params["gross_margin"] = ratio
+
+
+def _extract_unit_cost_alias(text: str, params: dict) -> None:
+    """单位变动成本同义词（E5）：`食材成本每份8元` / `每碗成本5元` / `单位成本7元`。
+
+    为什么走独立正则而不进 `_FIELD_PATTERNS` 的 keyword 列表？
+    因为通用 keyword 的兜底会把「食材成本占营业额45%」里的 45 抽成
+    「每份 45 元」——那是**占比**，不是单位成本。这里强制数字后紧跟「元/块」，
+    从结构上排除百分比写法。
+    """
+    if params.get("unit_variable_cost") is not None:
+        return
+    m = re.search(
+        r"(?:食材|原料|材料|变动|可变|单位|单份|单件|每碗|每杯|每份|每件|每瓶|每个|单个)"
+        r"\s*成本\s*(?:为|是|要|约|大约|大概)?\s*"
+        r"(?:每碗|每杯|每份|每件|每瓶|每个|单份|单件)?\s*"
+        r"(\d+(?:\.\d+)?)\s*[元块]",
+        text,
+    )
+    if m:
+        val = _parse_number(m.group(1))
+        if val and val > 0:
+            params["unit_variable_cost"] = val
+
+
+def _extract_unit_price_alias(text: str, params: dict) -> None:
+    """量词别名客单价（E3）：`每碗18元` / `每杯15元` / `每位30元` / `每个20块`。
+
+    同理走独立正则（`_FIELD_PATTERNS` 是先到先得，`每份` 会与 `每份成本` 抢词）。
+    两重护栏：
+    1. 数字后必须紧跟「元/块」→「每份成本7元」天然不匹配；
+    2. 量词前 4 字内出现「成本」则跳过 →「食材成本每份8元」不会被当售价。
+    另：「每天卖80杯」的「每 + 天」不在量词表内，不会误伤客流。
+    """
+    if params.get("price_per_unit") is not None:
+        return
+    for m in re.finditer(
+            rf"(?:每|一)\s*(?:{_QUANTIFIERS})\s*(\d+(?:\.\d+)?)\s*[元块]", text):
+        if "成本" in text[max(0, m.start() - 4):m.start()]:
+            continue
+        val = _parse_number(m.group(1))
+        if val and val > 0:
+            params["price_per_unit"] = val
             return
 
 
@@ -675,6 +799,16 @@ def extract_params(text: str) -> Dict:
 
     # ── 补充抽取：变动成本率（「食材成本占营业额45%」「成本率40%」）──
     _extract_cost_ratio(text, params)
+
+    # ── 补充抽取：中文分数「X成」（「食材成本占4成」「毛利率六成」）──
+    #    必须在通用字段之后跑：「六成」会被通用兜底抽成 6，此处覆盖修正。
+    _extract_cn_fraction(text, params)
+
+    # ── 补充抽取：单位成本同义词 / 量词别名（走独立正则，不进 keyword 列表）──
+    #    顺序：先成本后售价——「食材成本每份8元」两个正则都会看到「每份8元」，
+    #    但 E5 认成本、E3 靠「成本」前置词护栏跳过，互不抢词。
+    _extract_unit_cost_alias(text, params)
+    _extract_unit_price_alias(text, params)
 
     # ── 补充后去噪：通用字段 variable_cost_rate 可能误抓相邻客流数字
     #    （如「日售50杯变动成本率55%」→ 50），而精确的 variable_cost_ratio

@@ -162,6 +162,7 @@ if __name__ == "__main__":
         (t30, "LlmSettings · LLM 配置读写（类方法风格）"),
         (t31, "SimulatorUpgrade · 收入序列 / 投资指标（类方法风格）"),
         (t32, "VcConsistency · 变动成本率一致性"),
+        (t33, "ExtractorCoverage · 抽取器措辞矩阵 + 单位契约"),
     ):
         p, f, s = _run_module(mod, label)
         total_p += p
