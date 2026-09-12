@@ -4,7 +4,6 @@
 - S1: 用户指定多期收入序列
 - S2: NPV/IRR 接入 quick_scan
 - S3: 动态跑道
-- S4: 参数阶梯依赖
 - S5: 多期场景对比
 """
 import json
@@ -15,7 +14,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from tools.workflow_engine import (
     _project_trend_12m,
-    _apply_step_rules,
     _fill_and_assess,
     compare_scenarios,
     quick_scan,
@@ -202,61 +200,6 @@ class TestDynamicRunway:
         assert ">" in dr["runway_label"]
 
 
-# ─── S4: 参数阶梯依赖 ────────────────────────────────────────────────────
-
-class TestStepRules:
-    """S4: 参数阶梯依赖。"""
-
-    def test_revenue_triggers_employee(self):
-        """月营收 12 万 → 员工数应升为 5。"""
-        params = {"monthly_revenue": 120000}
-        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失] 未提供"}
-        params, src, changes = _apply_step_rules(params, src)
-        assert params["employee_count"] == 5
-        assert "employee_count" in changes
-        assert "[阶梯]" in src["employee_count"]
-
-    def test_employee_triggers_rent(self):
-        """员工数 5 → 租金应升为 8000。"""
-        params = {"monthly_revenue": 120000}
-        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失] 未提供",
-               "monthly_rent": "[缺失] 未提供"}
-        params, src, changes = _apply_step_rules(params, src)
-        assert params["monthly_rent"] == 8000
-        assert "monthly_rent" in changes
-
-    def test_user_value_not_overridden(self):
-        """用户显式值不被阶梯规则覆盖。"""
-        params = {"monthly_revenue": 120000, "employee_count": 10}
-        src = {"monthly_revenue": "[用户]", "employee_count": "[用户] 10人"}
-        params, src, changes = _apply_step_rules(params, src)
-        assert params["employee_count"] == 10  # 不被覆盖
-        assert "employee_count" not in changes
-
-    def test_low_revenue(self):
-        """低营收（<5万）→ 员工数 2。"""
-        params = {"monthly_revenue": 30000}
-        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失]"}
-        params, src, changes = _apply_step_rules(params, src)
-        assert params["employee_count"] == 2
-
-    def test_high_revenue(self):
-        """高营收（>50万）→ 员工数 12，租金 20000。"""
-        params = {"monthly_revenue": 600000}
-        src = {"monthly_revenue": "[用户]", "employee_count": "[缺失]",
-               "monthly_rent": "[缺失]"}
-        params, src, changes = _apply_step_rules(params, src)
-        assert params["employee_count"] == 12
-        assert params["monthly_rent"] == 20000
-
-    def test_no_rules_no_change(self):
-        """无触发条件时不变化。"""
-        params = {"monthly_revenue": None}
-        src = {"monthly_revenue": "[缺失]"}
-        params, src, changes = _apply_step_rules(params, src)
-        assert changes == []
-
-
 # ─── S5: 多期场景对比 ────────────────────────────────────────────────────
 
 class TestMultiPeriodComparison:
@@ -306,6 +249,9 @@ class TestMultiPeriodComparison:
             "monthly_revenue": 30000,
             "monthly_fixed_cost": 10000,
             "variable_cost_ratio": 0.4,
+            "monthly_rent": 5000,
+            "employee_count": 2,
+            "avg_salary": 5000,
             "available_cash": 100000,
             "total_investment": 100000,
             "price_per_unit": 25,
@@ -316,6 +262,9 @@ class TestMultiPeriodComparison:
             "monthly_revenue": 60000,
             "monthly_fixed_cost": 20000,
             "variable_cost_ratio": 0.4,
+            "monthly_rent": 10000,
+            "employee_count": 4,
+            "avg_salary": 5000,
             "available_cash": 200000,
             "total_investment": 200000,
             "price_per_unit": 25,
@@ -341,6 +290,9 @@ class TestQuickScanIntegration:
                 "monthly_revenue": 50000,
                 "monthly_fixed_cost": 15000,
                 "variable_cost_ratio": 0.4,
+                "monthly_rent": 8000,
+                "employee_count": 3,
+                "avg_salary": 5000,
                 "monthly_growth_rate": 0.05,
                 "available_cash": 200000,
                 "total_investment": 200000,
@@ -361,6 +313,9 @@ class TestQuickScanIntegration:
                 "monthly_revenue": [30000, 45000, 60000, 75000, 90000],
                 "monthly_fixed_cost": 15000,
                 "variable_cost_ratio": 0.4,
+                "monthly_rent": 8000,
+                "employee_count": 3,
+                "avg_salary": 5000,
                 "available_cash": 200000,
                 "total_investment": 200000,
                 "price_per_unit": 25,

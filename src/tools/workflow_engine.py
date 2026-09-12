@@ -100,72 +100,6 @@ def _get_industry_seasonal_profile(industry_name: str) -> dict:
     return dict(_DEFAULT_SEASON_MAP)
 
 
-_STEP_RULES_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "config", "step_rules.yaml",
-)
-
-
-@lru_cache(maxsize=1)
-def _load_step_rules() -> dict:
-    """从 YAML 读取阶梯依赖规则，返回 {field: rule_dict}。"""
-    try:
-        with open(_STEP_RULES_PATH, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return data.get("step_rules", {})
-    except FileNotFoundError:
-        return {}
-
-
-def _apply_step_rules(params: dict, src: dict) -> tuple:
-    """应用阶梯依赖规则，返回 (params, src, changed_fields)。
-
-    规则语义：当 trigger 字段的值落入某个 range 时，自动推算 target 字段的值。
-    - 用户显式输入的字段（src 以 [用户] 开头）不被覆盖
-    - 最多迭代 5 次防止循环依赖
-    - 返回 changed_fields 列表供上层标注
-    """
-    rules = _load_step_rules()
-    if not rules:
-        return params, src, []
-
-    changed_fields = []
-    for _iteration in range(5):
-        any_changed = False
-        for target_field, rule in rules.items():
-            # 用户显式值不覆盖
-            if src.get(target_field, "").startswith("[用户]"):
-                continue
-            trigger_field = rule.get("trigger")
-            if not trigger_field:
-                continue
-            trigger_val = params.get(trigger_field)
-            if trigger_val is None:
-                continue
-            # 收入序列取第一个值
-            if isinstance(trigger_val, (list, tuple)):
-                trigger_val = trigger_val[0] if trigger_val else None
-            if trigger_val is None:
-                continue
-            for r in rule.get("ranges", []):
-                lo = r.get("min", 0)
-                hi = r.get("max", float("inf"))
-                if lo <= trigger_val < hi:
-                    new_val = r["value"]
-                    old_val = params.get(target_field)
-                    if old_val != new_val:
-                        params[target_field] = new_val
-                        note = r.get("note", "")
-                        src[target_field] = f"[阶梯] {trigger_field}={trigger_val:g} → {target_field}={new_val}"
-                        if target_field not in changed_fields:
-                            changed_fields.append(target_field)
-                        any_changed = True
-                    break
-        if not any_changed:
-            break
-    return params, src, changed_fields
-
-
 def _get_templates() -> dict:
     return _load_templates()
 
@@ -996,15 +930,6 @@ def _fill_and_assess(raw: dict) -> dict:
     输出 12 个月全 -8000 的静默误报）。
     """
     params, src, mixed = _fill_params(raw)
-    # 阶梯依赖：营收→员工数→租金等联动推算（用户显式值不覆盖）
-    params, src, step_changes = _apply_step_rules(params, src)
-    if step_changes:
-        # 阶梯规则触发后，重新计算派生字段（人工/固定成本/利润等）
-        from field_model import derive as _model_derive
-        _dv, _dm = _model_derive(params)
-        for dk, dv in _dv.items():
-            if dk not in params or params.get(dk) is None:
-                params[dk] = dv
     conf = _derive_conf(src)
     suff = _check_sufficiency(params, src)
     # P0：数据基础分类（user/missing/hypothesis），供决策层与输出层用
