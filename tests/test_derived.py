@@ -130,6 +130,40 @@ def test_dv_engine_layer():
     assert st["derived"] == _build_derived_values(st["params"], st["src"])
 
 
+def test_dv7_no_none_placeholder_in_header():
+    """DV7：标题不得出现字面量「None」——stage / template_mode 缺失时应省略。"""
+    md = format_response("quick_scan", _scan(_FULL))
+    head = md.splitlines()[0]
+    assert head.startswith("## 📊 "), head
+    assert "None" not in head, head
+
+
+def test_dv8_breakeven_traffic_unit_from_industry():
+    """DV8：盈亏平衡客流单位按行业 benchmark 取，不再写死「杯/天」。"""
+    from router.formatter import _traffic_unit
+    # 餐饮 benchmark = "80-250 杯"
+    assert _traffic_unit({"daily_traffic_range": "80-250 杯"}) == "杯/天"
+    assert _traffic_unit({"daily_traffic_range": "50-150 人"}) == "人/天"
+    assert _traffic_unit({"daily_traffic_range": "20-80 人次"}) == "人次/天"
+    # 取不到单位 → 中性兜底（宠物「10-30 只宠物/天」、SaaS「不适用」…）
+    assert _traffic_unit({"daily_traffic_range": "10-30 只宠物/天"}) == "单/天"
+    assert _traffic_unit({"daily_traffic_range": "不适用"}) == "单/天"
+    assert _traffic_unit({}) == "单/天"
+    # 渲染链路确实用上了行业单位
+    md = format_response("quick_scan", _scan(_FULL))   # 餐饮
+    rows = [l for l in md.splitlines() if "盈亏平衡客流" in l]
+    if rows:
+        assert "杯/天" in rows[0], rows[0]
+
+
+def test_dv9_missing_items_no_empty_code_span():
+    """DV9：「暂不能推算」项没有公式时不得渲染成一对空反引号。"""
+    md = format_response("quick_scan", _scan({"monthly_rent": 8000}))
+    for line in md.splitlines():
+        if line.startswith("- ") and "缺 **" in line:
+            assert not line.rstrip().endswith("``"), line
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = failed = 0

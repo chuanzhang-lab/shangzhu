@@ -4,7 +4,19 @@
 """
 
 import json
+import re
 from typing import Any, Dict, List, Optional
+
+
+def _traffic_unit(benchmark: Optional[Dict] = None) -> str:
+    """客流单位：从行业 benchmark 的 daily_traffic_range 里取（「80-250 杯」→「杯/天」）。
+
+    旧实现把「杯/天」写死在模板里 —— 面馆会看到「盈亏平衡客流 46 杯/天」，
+    单位张冠李戴。此处按行业取值，取不到则退中性单位。
+    """
+    rng = (benchmark or {}).get("daily_traffic_range") or ""
+    m = re.search(r"\d+\s*[-~－—]\s*\d+\s*([\u4e00-\u9fa5]{1,2})\s*$", rng)
+    return f"{m.group(1)}/天" if m else "单/天"
 
 
 # ─── 工具: quick_scan ─────────────────────────────────────────────────────
@@ -86,7 +98,9 @@ def _fmt_derived(derived) -> list:
         out.append("**暂不能推算**（缺输入）：")
         out.append("")
         for d in miss_items:
-            out.append(f"- {d['label']}：缺 **{d.get('missing', '未知')}**（`{d['formula']}`）")
+            # missing 项的 formula 为空串 —— 不要渲染成一对空反引号「``」
+            fx = f"（`{d['formula']}`）" if d.get("formula") else ""
+            out.append(f"- {d['label']}：缺 **{d.get('missing', '未知')}**{fx}")
         out.append("")
     return out
 
@@ -109,13 +123,11 @@ def _fmt_scan(data: Dict) -> str:
     lines = []
 
     # 标题 + 项目类型
-    project_type = data.get("project_type", "项目")
-    stage = data.get("stage", "")
-    template_mode = data.get("template_mode", "")
-    if template_mode:
-        lines.append(f"## 📊 {project_type}分析（{stage} · {template_mode}）")
-    else:
-        lines.append(f"## 📊 {project_type}分析（{stage}）")
+    # 括号内只呈现**已知**信息：stage/template_mode 缺失时不得渲染成字面量「None」
+    project_type = data.get("project_type") or "项目"
+    _quals = [s for s in (data.get("stage"), data.get("template_mode")) if s]
+    _suffix = f"（{' · '.join(str(q) for q in _quals)}）" if _quals else ""
+    lines.append(f"## 📊 {project_type}分析{_suffix}")
     lines.append("")
 
     # 数据冲突（派生一致性）：规则层先发现，前置高亮，不依赖 LLM
@@ -151,7 +163,7 @@ def _fmt_scan(data: Dict) -> str:
 
     daily_breakeven = core.get("daily_breakeven")
     if daily_breakeven:
-        lines.append(f"| 盈亏平衡客流 | {daily_breakeven:.0f} 杯/天 | — |")
+        lines.append(f"| 盈亏平衡客流 | {daily_breakeven:.0f} {_traffic_unit(data.get('benchmark'))} | — |")
 
     gross_margin = core.get("gross_margin_percent")
     if gross_margin:
