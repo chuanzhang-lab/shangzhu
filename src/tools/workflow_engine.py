@@ -70,6 +70,36 @@ def _load_templates() -> dict:
         return yaml.safe_load(f) or {}
 
 
+# 通用季节系数（无行业模板时的 fallback）
+_DEFAULT_SEASON_MAP = {1: 0.85, 2: 0.95, 3: 1.0, 4: 1.05, 5: 1.05, 6: 1.1,
+                       7: 1.1, 8: 1.05, 9: 1.0, 10: 1.0, 11: 0.95, 12: 0.9}
+
+
+def _get_industry_seasonal_profile(industry_name: str) -> dict:
+    """获取行业季节系数：优先读行业模板的 seasonal_profile，fallback 通用 map。
+
+    Returns:
+        {1: 系数, 2: 系数, ..., 12: 系数}
+    """
+    if not industry_name:
+        return dict(_DEFAULT_SEASON_MAP)
+
+    templates = _load_templates()
+    industry_templates = templates.get("industry_templates", {})
+    aliases = templates.get("industry_aliases", {})
+
+    # 解析行业名（含别名）
+    resolved = aliases.get(industry_name, industry_name)
+    tpl = industry_templates.get(resolved)
+
+    if tpl and "seasonal_profile" in tpl:
+        profile = tpl["seasonal_profile"]
+        if isinstance(profile, list) and len(profile) == 12:
+            return {i + 1: float(v) for i, v in enumerate(profile)}
+
+    return dict(_DEFAULT_SEASON_MAP)
+
+
 _STEP_RULES_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "config", "step_rules.yaml",
@@ -812,8 +842,8 @@ def _project_trend_12m(params: dict) -> dict:
         if months_count < 1:
             months_count = 12
 
-    season_map = {1: 0.85, 2: 0.95, 3: 1.0, 4: 1.05, 5: 1.05, 6: 1.1,
-                  7: 1.1, 8: 1.05, 9: 1.0, 10: 1.0, 11: 0.95, 12: 0.9}
+    # 行业季节系数：优先读行业模板的 seasonal_profile，fallback 通用 map
+    season_map = _get_industry_seasonal_profile(params.get("industry_name", ""))
 
     months = []
     cumulative_profit = 0
@@ -863,10 +893,15 @@ def _project_trend_12m(params: dict) -> dict:
     total_annual_profit = sum(valid_profits) if valid_profits else 0
     max_monthly_loss = min(valid_profits) if valid_profits else 0
 
+    # 季节系数来源标注
+    industry_name = params.get("industry_name", "")
+    has_industry_seasonal = season_map != _DEFAULT_SEASON_MAP
+
     result = {
         "months": months,
         "input_mode": "series" if is_series else "growth_rate",
         "months_count": months_count,
+        "seasonal_source": f"行业模板（{industry_name}）" if has_industry_seasonal else "通用系数（仅供参考）",
         "summary": {
             "total_annual_profit": round(total_annual_profit, 0),
             "max_monthly_loss": round(max_monthly_loss, 0),

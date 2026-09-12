@@ -297,6 +297,12 @@ def _fmt_trend(data: Dict) -> str:
     lines.append("## 📈 12个月趋势预测")
     lines.append("")
 
+    # 季节系数来源
+    seasonal_source = data.get("seasonal_source", "")
+    if seasonal_source:
+        lines.append(f"> 季节系数来源：{seasonal_source}")
+        lines.append("")
+
     # 摘要
     if summary:
         lines.append("## 摘要")
@@ -489,6 +495,132 @@ def _fmt_benchmark(data: Dict) -> str:
     return "\n".join(lines)
 
 
+# ─── 成本归因拆解 ────────────────────────────────────────────────────────
+
+def _fmt_attribution(data: Dict) -> str:
+    """成本归因拆解渲染：各分量金额+占比+风险提示。"""
+    if "error" in data:
+        return f"## ⚠️ 归因分析失败\n\n{data['error']}"
+    if data.get("insufficient"):
+        md = ["## 💰 成本归因还不能定", ""]
+        md.append(data.get("message", "成本数据不足，无法进行归因分析。"))
+        for g in data.get("gaps", []):
+            md.append(f"- 补充：{g}")
+        return "\n".join(md)
+
+    lines = []
+    lines.append("## 💰 成本结构归因")
+    lines.append("")
+
+    total = data.get("total_monthly_cost", 0)
+    fixed = data.get("fixed_cost", 0)
+    variable = data.get("variable_cost", 0)
+    lines.append(f"**月度总成本**：{total:,.0f} 元（固定 {fixed:,.0f} + 变动 {variable:,.0f}）")
+    lines.append(f"**固定/变动比**：{data.get('fixed_ratio', 0):.0%} / {data.get('variable_ratio', 0):.0%}")
+    lines.append("")
+
+    components = data.get("components", [])
+    if components:
+        lines.append("### 各分量明细")
+        lines.append("")
+        lines.append("| 分项 | 金额 | 占比 | 来源 |")
+        lines.append("|------|------|------|------|")
+        for c in components:
+            pct = f"{c['percent']:.0%}"
+            lines.append(f"| {c['name']} | {c['amount']:,.0f} 元 | {pct} | {c.get('source', '')} |")
+        lines.append("")
+
+    # 可视化条形（文本版）
+    if components:
+        lines.append("### 成本占比图")
+        lines.append("")
+        for c in components[:5]:
+            bar_len = int(c["percent"] * 30)
+            bar = "█" * bar_len + "░" * (30 - bar_len)
+            lines.append(f"  {c['name']:　<5} {bar} {c['percent']:.0%}（{c['amount']:,.0f}）")
+        lines.append("")
+
+    top = data.get("top_component", {})
+    if top.get("name"):
+        lines.append(f"**最大成本项**：{top['name']}（{top['amount']:,.0f} 元，占 {top['percent']:.0%}）")
+        lines.append("")
+
+    warnings = data.get("warnings", [])
+    if warnings:
+        lines.append("### 风险提示")
+        lines.append("")
+        for w in warnings:
+            lines.append(f"- {w}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("操作: 改参数 | 敏感度分析 | 对比方案 | 趋势预测")
+
+    return "\n".join(lines)
+
+
+# ─── 敏感度分析（单一变量弹性）────────────────────────────────────────────
+
+def _fmt_sensitivity(data: Dict) -> str:
+    """单一变量弹性分析渲染：盈亏平衡点 + 安全边际 + 曲线。"""
+    if "error" in data:
+        return f"## ⚠️ 敏感度分析失败\n\n{data['error']}"
+    if data.get("insufficient"):
+        md = ["## 📐 敏感度分析还不能定", ""]
+        md.append(data.get("message", "数据不足，无法做弹性分析。"))
+        for g in data.get("gaps", []):
+            md.append(f"- 补充：{g}")
+        return "\n".join(md)
+
+    lines = []
+    lines.append("## 📐 弹性分析")
+    lines.append("")
+
+    label = data.get("variable_label", "")
+    current = data.get("current_value", 0)
+    breakeven = data.get("breakeven_value")
+
+    if breakeven is None:
+        lines.append(f"**分析变量**：{label}")
+        lines.append(f"**当前值**：{current:g}")
+        lines.append("")
+        lines.append(data.get("interpretation", "无法计算盈亏平衡点。"))
+        return "\n".join(lines)
+
+    margin = data.get("margin", 0)
+    margin_pct = data.get("margin_pct", 0)
+    direction = data.get("direction", "")
+
+    lines.append(f"**分析变量**：{label}")
+    lines.append(f"**当前值**：{current:g}")
+    lines.append(f"**盈亏平衡点**：{breakeven:g}")
+    lines.append(f"**安全边际**：{margin:g}（{margin_pct:.0%}）· 方向：{direction}")
+    lines.append("")
+
+    # 解读
+    lines.append(f"> {data.get('interpretation', '')}")
+    lines.append("")
+
+    # 敏感度曲线
+    curve = data.get("sensitivity_curve", [])
+    if curve:
+        lines.append("### 利润随变量变化")
+        lines.append("")
+        lines.append(f"| {label} | 月利润 | 状态 |")
+        lines.append("|------|--------|------|")
+        for point in curve:
+            v = point["value"]
+            p = point["profit"]
+            status = "🟢" if p > 0 else ("🔴" if p < 0 else "⚪")
+            lines.append(f"| {v:g} | {p:,.0f} 元 | {status} |")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("操作: 改参数 | 成本归因 | 对比方案 | 趋势预测")
+
+    return "\n".join(lines)
+
+
 # ─── L2 决策 ────────────────────────────────────────────────────────────
 
 def _fmt_decision(data: Dict) -> str:
@@ -557,6 +689,8 @@ _FORMATTERS = {
     "suggest": _fmt_suggest,
     "decide": _fmt_decision,
     "cashflow": _fmt_cashflow,
+    "attribution": _fmt_attribution,
+    "sensitivity": _fmt_sensitivity,
     "report_pdf": _fmt_report,
     "report_excel": _fmt_report,
     "benchmark": _fmt_benchmark,

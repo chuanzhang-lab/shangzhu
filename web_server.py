@@ -95,6 +95,8 @@ from tools.workflow_engine import (
 )
 from tools.param_advisor import suggest_params as suggest_params_tool
 from tools.market_research import search_industry_benchmarks as benchmark_tool
+from tools.cost_attribution import _build_cost_attribution
+from tools.financial_calculator import _calc_sensitivity
 from tools.report_generator import (
     generate_financial_report as report_pdf_tool,
     generate_financial_excel as report_excel_tool,
@@ -194,13 +196,15 @@ _START_TIME = time.time()
 _PROJECT_INTENTS = {
     "quick_scan", "suggest", "trend", "compare", "breakeven",
     "benchmark", "market", "report_pdf", "report_excel", "decide", "cashflow",
+    "attribution", "sensitivity",
 }
 # 会累积进 SessionState 的「项目定义」意图（与纯调研/报告/假设分析区分）
 # compare 虽能修改参数，但属于一次性假设分析，不污染 session base。
 _STATE_INTENTS = {"quick_scan", "suggest", "trend", "decide", "cashflow"}
 
 # 一次性/假设分析意图：本句抽出的参数不污染 session base
-_STATELESS_INTENTS = {"compare", "report_pdf", "report_excel", "market", "benchmark"}
+_STATELESS_INTENTS = {"compare", "report_pdf", "report_excel", "market", "benchmark",
+                       "attribution", "sensitivity"}
 
 # 安全限制：单条用户消息最大长度（字符数），防止极端输入拖垮引擎/LLM
 _MAX_INPUT_LENGTH = 10000
@@ -377,6 +381,174 @@ def _fac_apply_for_step3():
     pass
 
 
+def _infer_sensitivity_variable(drivers: list, params: dict) -> str:
+    """从 scenarios.drivers 推断最应分析的变量。
+
+    优先级：客流 > 租金 > 变动成本率 > 人工。
+    无 drivers 时默认分析客流（最常见的创业关切）。
+    """
+    _DRIVER_TO_VAR = {
+        "客流": "daily_traffic",
+        "月营收": "daily_traffic",  # 营收波动的根源是客流
+        "租金": "monthly_rent",
+        "人工": "employee_count",
+        "变动成本率": "variable_cost_ratio",
+    }
+    for driver in drivers:
+        for keyword, var in _DRIVER_TO_VAR.items():
+            if keyword in driver:
+                return var
+    # 默认：如果用户有客流数据就分析客流，否则分析租金
+    if params.get("daily_traffic") is not None:
+        return "daily_traffic"
+    if params.get("monthly_rent") is not None:
+        return "monthly_rent"
+    return "daily_traffic"
+
+
+def _build_single_variable_sensitivity(params: dict, variable: str) -> dict:
+    """单一变量弹性分析：找到指定变量的盈亏平衡点。
+
+    Args:
+        params: 已填充参数
+        variable: 要分析的变量名（daily_traffic / monthly_rent / variable_cost_ratio）
+
+    Returns:
+        {
+            "variable": "daily_traffic",
+            "variable_label": "日均客流",
+            "current_value": 100,
+            "breakeven_value": 67,
+            "margin": 33,           # 当前值离盈亏平衡点的距离
+            "margin_pct": 0.33,     # 距离百分比
+            "direction": "下降",    # 变量需要上升还是下降才能盈亏平衡
+            "sensitivity_curve": [  # 变量在不同值下的利润
+                {"value": 50, "profit": -3000},
+                {"value": 67, "profit": 0},
+                {"value": 100, "profit": 5000},
+                ...
+            ],
+            "interpretation": "客流降至 67 杯/天时盈亏平衡，当前 100 杯/天有 33% 的安全边际。",
+        }
+    """
+    revenue = params.get("monthly_revenue") or 0
+    fixed_cost = params.get("monthly_fixed_cost") or 0
+    vc_ratio = params.get("variable_cost_ratio")
+    daily_traffic = params.get("daily_traffic") or 0
+    price = params.get("price_per_unit") or 0
+    rent = params.get("monthly_rent") or 0
+
+    if vc_ratio is None:
+        return {"insufficient": True, "message": "变动成本率缺失，无法做弹性分析。", "gaps": ["变动成本率"]}
+
+    _VAR_LABELS = {
+        "daily_traffic": "日均客流（杯/天）",
+        "monthly_rent": "月租金（元）",
+        "variable_cost_ratio": "变动成本率（%）",
+        "employee_count": "员工人数（人）",
+        "avg_salary": "人均月薪（元）",
+        "price_per_unit": "客单价（元）",
+    }
+    label = _VAR_LABELS.get(variable, variable)
+
+    # ── 盈亏平衡点求解 ──
+    # 利润 = 营收 - 固定成本 - 营收×vc_ratio = 营收×(1-vc_ratio) - 固定成本
+    # 营收 = daily_traffic × price × 30
+    # 所以：daily_traffic × price × 30 × (1-vc_ratio) = 固定成本
+    # → daily_traffic = 固定成本 / (price × 30 × (1-vc_ratio))
+
+    current_value = params.get(variable) or 0
+    breakeven_value = None
+
+    if variable == "daily_traffic":
+        if price > 0 and (1 - vc_ratio) > 0:
+            breakeven_value = round(fixed_cost / (price * 30 * (1 - vc_ratio)), 1)
+    elif variable == "monthly_rent":
+        # 利润 = revenue×(1-vc_ratio) - rent - (fixed_cost - rent) - revenue×vc_ratio
+        # 简化：利润 = revenue - fixed_cost - revenue×vc_ratio
+        # 固定成本 = rent + other_fixed
+        # → breakeven_rent = revenue×(1-vc_ratio) - (fixed_cost - rent)
+        other_fixed = fixed_cost - rent
+        contribution_margin = revenue * (1 - vc_ratio)
+        breakeven_value = round(contribution_margin - other_fixed, 0)
+    elif variable == "variable_cost_ratio":
+        if revenue > 0:
+            # 利润 = revenue×(1-vc_ratio) - fixed_cost = 0
+            # → vc_ratio = 1 - fixed_cost/revenue
+            breakeven_value = round(1 - fixed_cost / revenue, 4)
+    elif variable == "employee_count":
+        avg_salary = params.get("avg_salary") or 0
+        if avg_salary > 0:
+            other_labor = fixed_cost - (current_value * avg_salary if current_value else 0)
+            contribution_margin = revenue * (1 - vc_ratio)
+            breakeven_value = round((contribution_margin - other_labor + rent) / avg_salary, 1) if avg_salary else None
+    elif variable == "price_per_unit":
+        if daily_traffic > 0 and (1 - vc_ratio) > 0:
+            breakeven_value = round(fixed_cost / (daily_traffic * 30 * (1 - vc_ratio)), 1)
+
+    if breakeven_value is None or breakeven_value <= 0:
+        return {
+            "variable": variable,
+            "variable_label": label,
+            "current_value": current_value,
+            "breakeven_value": None,
+            "interpretation": f"当前参数下无法计算「{label}」的盈亏平衡点（可能缺少关键数据）。",
+        }
+
+    # ── 安全边际 ──
+    if variable == "variable_cost_ratio":
+        # 变动成本率越低越好，margin = 当前值 - 盈亏平衡值（负的margin=已超平衡点）
+        margin = breakeven_value - current_value
+        direction = "上升" if margin > 0 else "已超"
+    else:
+        margin = current_value - breakeven_value
+        direction = "下降" if margin > 0 else "已超"
+
+    margin_pct = abs(margin) / current_value if current_value > 0 else 0
+
+    # ── 敏感度曲线（11 个点）──
+    curve = []
+    for i in range(11):
+        pct = -0.5 + i * 0.1  # -50% 到 +50%
+        v = breakeven_value * (1 + pct) if breakeven_value > 0 else 0
+        if variable == "daily_traffic":
+            rev = v * price * 30
+            profit = rev * (1 - vc_ratio) - fixed_cost
+        elif variable == "monthly_rent":
+            other_fixed = fixed_cost - rent
+            profit = revenue * (1 - vc_ratio) - v - other_fixed
+        elif variable == "variable_cost_ratio":
+            profit = revenue * (1 - v) - fixed_cost
+        else:
+            profit = 0  # 其他变量的曲线简化
+        curve.append({"value": round(v, 1), "profit": round(profit, 0)})
+
+    # ── 解读 ──
+    if margin > 0:
+        interp = (
+            f"「{label}」的盈亏平衡点是 {breakeven_value:g}，"
+            f"当前 {current_value:g}，有 {abs(margin):g}（{margin_pct:.0%}）的安全边际。"
+            f"即使{label}{'下降' if variable not in ('variable_cost_ratio',) else '上升'}到 {breakeven_value:g}，项目仍不亏。"
+        )
+    else:
+        interp = (
+            f"⚠️ 「{label}」当前 {current_value:g}，已{'超过' if variable == 'variable_cost_ratio' else '低于'}"
+            f"盈亏平衡点 {breakeven_value:g}，项目处于亏损状态。"
+        )
+
+    return {
+        "variable": variable,
+        "variable_label": label,
+        "current_value": current_value,
+        "breakeven_value": breakeven_value,
+        "margin": round(abs(margin), 1),
+        "margin_pct": round(margin_pct, 4),
+        "direction": direction,
+        "sensitivity_curve": curve,
+        "interpretation": interp,
+    }
+
+
 def _route_intent(intent: str, merged_params: dict, user_text: str) -> Optional[Dict]:
     """
     根据意图和**已 merge 的会话参数**，调对应工具，返回结构化数据。
@@ -435,6 +607,30 @@ def _route_intent(intent: str, merged_params: dict, user_text: str) -> Optional[
     elif intent == "trend":
         tool_data = trend_tool.invoke({"params_json": params_json})
         return {"intent": intent, "data": _safe_json_loads(tool_data, "trend_projection"), "params": merged_params}
+
+    elif intent == "attribution":
+        # 归因拆解：复用 quick_scan 的 _fill_and_assess 产出，不重算
+        scan = _safe_json_loads(quick_scan_tool.invoke({"params_json": params_json}), "quick_scan")
+        if scan.get("insufficient"):
+            return {"intent": intent, "data": scan, "params": merged_params}
+        filled_params = scan.get("params", merged_params)
+        # 注入参数来源标注（供归因展示"来自用户/默认/推算"）
+        filled_params["_param_sources"] = scan.get("param_sources", {})
+        attr_data = _build_cost_attribution(filled_params)
+        return {"intent": intent, "data": attr_data, "scan": scan, "params": merged_params}
+
+    elif intent == "sensitivity":
+        # 敏感度分析：复用 quick_scan 产出，提取单一变量弹性
+        scan = _safe_json_loads(quick_scan_tool.invoke({"params_json": params_json}), "quick_scan")
+        if scan.get("insufficient"):
+            return {"intent": intent, "data": scan, "params": merged_params}
+        filled_params = scan.get("params", merged_params)
+        scenarios = scan.get("scenarios", {})
+        # 确定分析哪个变量：从 scenarios.drivers 取第一个，或默认分析客流
+        drivers = scenarios.get("drivers", [])
+        variable = _infer_sensitivity_variable(drivers, filled_params)
+        sens_data = _build_single_variable_sensitivity(filled_params, variable)
+        return {"intent": intent, "data": sens_data, "scan": scan, "params": merged_params}
 
     elif intent == "compare":
         alt_params = _extract_alt_params(merged_params, user_text)
