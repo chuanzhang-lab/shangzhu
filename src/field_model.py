@@ -36,7 +36,10 @@ INPUT_SPECS: Dict[str, Dict[str, Any]] = {
     "labor_burden": {"label": "劳动负担率", "unit": "", "type": "float"},
     "variable_cost_ratio": {"label": "变动成本率", "unit": "0~1", "type": "float"},
     "unit_variable_cost": {"label": "单位变动成本", "unit": "元/单位", "type": "float"},
-    "gross_margin": {"label": "毛利率", "unit": "%", "type": "float"},
+    # S3（2026-09-12）：统一为 0~1 口径 —— 与 param_guard 的归一化、
+    # 与 variable_cost_ratio 的 "0~1" 对齐。旧声明 "%" 与公式里的 ÷100 自相矛盾，
+    # 导致 derive({"gross_margin": 0.6}) 算出 vcr=0.994（应为 0.4）。
+    "gross_margin": {"label": "毛利率", "unit": "0~1", "type": "float"},
     "utilities": {"label": "水电", "unit": "元/月", "type": "float"},
     "packaging": {"label": "包装", "unit": "元/月", "type": "float"},
     "commission": {"label": "提成", "unit": "元/月", "type": "float"},
@@ -73,20 +76,22 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
         "describe": lambda p: f"日均客流 {p.get('daily_traffic', 0):g} × 客单价 {p.get('price_per_unit', 0):g} × 30天",
     },
     # 变动成本率：多路推导（用户 > unit_var÷price > 1−gm > None）
+    # S3：gm 为 0~1 口径，故此处是 `1 − gm`（不再是 `1 − gm/100`）。
     "variable_cost_ratio": {
         "deps": ["price_per_unit"],
         "formula": lambda p: (
             (p.get("unit_variable_cost") / p["price_per_unit"])
             if p.get("unit_variable_cost") is not None and p.get("price_per_unit")
-            else (1 - p.get("gross_margin", 0) / 100)
+            else (1 - p.get("gross_margin", 0))
             if p.get("gross_margin") is not None
             else None
         ),
         "label": "变动成本率", "unit": "0~1", "kind": "override", "user_direct_ok": True,
+        "display_percent": True,   # 内部 0~1，展示为百分数
         "describe": lambda p: (
             f"单位变动成本 {p.get('unit_variable_cost', 0):g} ÷ 客单价 {p.get('price_per_unit', 0):g}"
             if p.get("unit_variable_cost") is not None
-            else f"1 − 毛利率 {p.get('gross_margin', 0):g}%"
+            else f"1 − 毛利率 {p.get('gross_margin', 0):.0%}"
             if p.get("gross_margin") is not None
             else "公式推导"
         ),
@@ -154,11 +159,12 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
         "label": "年固定成本", "unit": "元/年", "kind": "derived",
         "describe": lambda p: f"月固定成本 {p.get('monthly_fixed_cost', 0):g} × 12",
     },
-    # 毛利率：1 - 变动成本率
+    # 毛利率：1 - 变动成本率（S3：统一 0~1 口径，展示时 ×100）
     "gross_margin": {
         "deps": ["variable_cost_ratio"],
-        "formula": lambda p: round((1 - p.get("variable_cost_ratio", 0)) * 100, 1) if p.get("variable_cost_ratio") is not None else None,
-        "label": "毛利率", "unit": "%", "kind": "derived",
+        "formula": lambda p: round(1 - p.get("variable_cost_ratio", 0), 4) if p.get("variable_cost_ratio") is not None else None,
+        "label": "毛利率", "unit": "0~1", "kind": "derived",
+        "display_percent": True,   # 内部 0~1，展示为百分数
         "describe": lambda p: f"1 − 变动成本率 {p.get('variable_cost_ratio', 0):.0%}",
     },
     # 可用现金：总投资（设备占比可选扣减）
@@ -477,12 +483,17 @@ def derived_values(params: Dict[str, Any], src: Optional[Dict[str, str]] = None)
             continue
         val = values.get(name)
         m = meta.get(name, {})
+        # 展示口径：内部 0~1 的比例类字段（毛利率 / 变动成本率）在展示层 ×100 成百分数。
+        # 既保持与旧版一致的视觉，也修掉「0.4 0~1」被 f"{v:,.0f}" 渲染成「0 0~1」的错。
+        disp_val, disp_unit = val, spec["unit"]
+        if spec.get("display_percent") and isinstance(val, (int, float)):
+            disp_val, disp_unit = round(val * 100, 1), "%"
         item: Dict[str, Any] = {
-            "field": name, "label": spec["label"], "unit": spec["unit"],
+            "field": name, "label": spec["label"], "unit": disp_unit,
             "status": "ok" if val is not None else "missing",
         }
         if val is not None:
-            item["value"] = round(val, 2) if isinstance(val, float) else val
+            item["value"] = round(disp_val, 2) if isinstance(disp_val, float) else disp_val
             # 公式说明：仅「用户可直接给」且来源确为[用户]时写「用户直接给出」
             s = src.get(name, "")
             if s.startswith("[用户]") and spec.get("user_direct_ok"):

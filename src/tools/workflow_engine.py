@@ -264,10 +264,12 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         ratio = float(user_unit_var) / p["price_per_unit"]
         p["variable_cost_ratio"] = _set("variable_cost_ratio", ratio, "[推导] 单位变动成本÷客单价")
     elif user_gm is not None:
-        gm = float(user_gm)
-        # 兼容 40(%) 和 0.4(比例) 两种输入
-        gm_ratio = gm / 100 if gm > 1 else gm
-        p["variable_cost_ratio"] = _set("variable_cost_ratio", 1 - gm_ratio, "[推算] 从用户毛利率反推")
+        # S3（2026-09-12）：gross_margin 统一为 0~1 口径（param_guard 已在抽取出口归一）。
+        # 删除旧的 `gm/100 if gm > 1 else gm` —— 用「值大小」猜单位本身不成立：
+        # 0.4（40%）与 40（40倍）都是合法值，猜不出。旧代码在主链路「恰好正确」
+        # 只是因为 guard 已把 60 归一成 0.6，属脆弱巧合。
+        p["variable_cost_ratio"] = _set(
+            "variable_cost_ratio", 1 - float(user_gm), "[推算] 从用户毛利率反推")
     else:
         # D2：取消「输入伪造型默认」。变动成本率没给/没推导 → 缺失，
         # 不再静默用行业模板填进计算图（会撑起假硬利润）；作假设候选待确认。
@@ -1266,10 +1268,11 @@ def quick_scan(params_json: str) -> str:
             be_status = "🔴 未达保本" if _rev_check < rev_based_be else "🟢 可达保本"
         else:
             be_status = "⚪ 部分未知（客单价/客流/营收未给，保本判定不完整）"
+        # S3：gross_margin 内部为 0~1 口径，阈值由 50/30 相应改为 0.5/0.3
         if params.get("gross_margin") is None:
             margin_status = "⚪ 未知（需变动成本率）"
         else:
-            margin_status = "🟢 健康" if params["gross_margin"] >= 50 else ("🟡 一般" if params["gross_margin"] >= 30 else "🔴 偏低")
+            margin_status = "🟢 健康" if params["gross_margin"] >= 0.5 else ("🟡 一般" if params["gross_margin"] >= 0.3 else "🔴 偏低")
 
         dashboard = {
             "project_type": params["industry_name"],
@@ -1287,7 +1290,10 @@ def quick_scan(params_json: str) -> str:
                 "daily_breakeven": daily_be,
                 "breakeven_revenue_monthly": rev_based_be,
                 "runway_months": rw_months,
-                "gross_margin_percent": params["gross_margin"],
+                # S3：内部 0~1，对外展示语义仍是百分数（60 表示 60%），
+                # 故此处 ×100 保住 formatter / decision_engine 的既有契约。
+                "gross_margin_percent": (round(params["gross_margin"] * 100, 1)
+                                         if params.get("gross_margin") is not None else None),
             },
             "status": {
                 "profit": profit_status,

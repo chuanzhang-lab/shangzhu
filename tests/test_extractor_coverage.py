@@ -187,8 +187,8 @@ def test_cov_contract_vcr_from_gm():
 
 
 def test_cov_contract_gm_from_vcr():
-    """变动成本率 → 毛利率：同为 0~1 口径（不是 0~100）。"""
-    for vcr, exp_gm in {0.4: 0.4, 0.55: 0.45, 0.25: 0.75}.items():
+    """变动成本率 → 毛利率：同为 0~1 口径（0.4 → 0.6，不是 60.0）。"""
+    for vcr, exp_gm in {0.4: 0.6, 0.55: 0.45, 0.25: 0.75}.items():
         d, _ = derive({"variable_cost_ratio": vcr})
         assert abs(d["gross_margin"] - exp_gm) < 1e-3, (vcr, d)
 

@@ -81,7 +81,7 @@
 | 5 | **细节层** | 抽取器 4 项：<br>**E1** 「成本占 X%」对象词改为可选，加负向断言排除「固定成本/总成本」<br>**E2** 新增 `_extract_cn_fraction`：`X成`→`×0.1`，须绑定语义（前 8 字含 成本/毛利/占/变/率）以免误伤「完成/成员/成为」<br>**E3** 新增 `_extract_unit_price_alias`：`每(碗\|杯\|份\|位\|件\|瓶\|个)+数字+元/块`，数字后必须跟元/块 → 天然排除「每份成本7元」<br>**E4** `_parse_number` 支持 `A万B`/`A千B` 缩写（`1万5`→15000）<br>**E5** `unit_variable_cost` 补 `食材成本/原料成本` 等同义词 | R2/R3/P1/P2/S1 |
 | 6 | **减法层** | ① 删 `gm/100 if gm>1 else gm` 单位猜测（L2）<br>② 删 `workflow_engine` 手写的 vcr 四路推导（R1，收敛后自然消失）<br>③ `price_per_unit.keywords` 里硬编码的 `一杯`/`元一杯`/`块一杯` 由 E3 的正则取代<br>④ **不做**：不做「万元 → 元」的全量单位系统重构（YAGNI，超出本轮需要） | L2/R1/S2 |
 | 7 | **风险层** | · **T3（改 `_parse_number` 波及全局）→ 消除**：先补措辞矩阵 oracle 再改，改后跑全量 355<br>· **S1（抢词）→ 消除**：改用独立正则函数，不进场 keyword 列表<br>· **L3（改单位波及面）→ 转移**：`gross_margin` 的 6 个消费点已全部定位（见第四节），逐点改并断言<br>· **R2/E2 误伤（「完成」「成本」被当分数）→ 消除**：靠语义前置词白名单约束<br>· **T2（负号）→ 接受**：现状不阻断交付，留待你确认设计意图后单独处理 | T3/S1/L3/R2/T2 |
-| 8 | **验证层** | ① 新增 `tests/test_extractor_coverage.py`：**措辞矩阵 oracle**——每类措辞一条断言（`每碗18元`→price=18、`食材成本占4成`→vcr=0.4、`月租金1万5`→15000 …），共约 20 断言<br>② 新增 `gross_margin` 单位契约断言：`derive({"variable_cost_ratio":0.4})["gross_margin"] == 0.4`、`derive({"gross_margin":0.4})["variable_cost_ratio"] == 0.6`（**双向**）<br>③ 反例断言：`每份成本7元`→`price_per_unit is None`；`月固定成本占40%`→`variable_cost_ratio is None`；`完成`/`成员`→无分数误抽<br>④ 回归：`make test` 全量 355 → 期望 **375+ passed / 0 failed** | X1 |
+| 8 | **验证层** | ① 新增 `tests/test_extractor_coverage.py`：**措辞矩阵 oracle**——每类措辞一条断言（`每碗18元`→price=18、`食材成本占4成`→vcr=0.4、`月租金1万5`→15000 …），共约 20 断言<br>② 新增 `gross_margin` 单位契约断言：`derive({"variable_cost_ratio":0.4})["gross_margin"] == 0.6`、`derive({"gross_margin":0.4})["variable_cost_ratio"] == 0.6`（**双向**）<br>③ 反例断言：`每份成本7元`→`price_per_unit is None`；`月固定成本占40%`→`variable_cost_ratio is None`；`完成`/`成员`→无分数误抽<br>④ 回归：`make test` 全量 355 → 期望 **375+ passed / 0 failed** | X1 |
 | 9 | **执行层** | 4 步，每步独立可测可回滚（见第六节） | — |
 | 10 | **兜底层** | 每步一个 `git commit`，任一步全量回归不绿即 `git revert` 该提交。抽取器与契约两组改动**分批提交**，确保契约改动出问题时可单独回退而不影响抽取器修复 | — |
 
@@ -114,7 +114,7 @@
 | `gross_margin` 单位 | 输入 0~1 / 声明 `%` / 输出 0~100（三处两种口径） | **统一 0~1**，展示层 `×100` | L1/L3 |
 | `gm/100 if gm>1 else gm` | 用值大小猜单位 | **删除** | L2（0.4 与 40 都合法，猜不出） |
 | `derive({"gross_margin":0.6})` | `variable_cost_ratio = 0.994` | `0.4` | L1 |
-| `derive({"variable_cost_ratio":0.4})` | `gross_margin = 60.0` | `0.4` | L1（与输入侧一致） |
+| `derive({"variable_cost_ratio":0.4})` | `gross_margin = 60.0` | `0.6` | L1（与输入侧同口径：1−0.4） |
 | `variable_cost_ratio` 推导 | `workflow_engine` 手写一份 + `field_model` 一份 | **仅 `field_model` 一份** | R1 |
 | `每碗18元` | 抽不到 | `price_per_unit = 18` | P2 |
 | `食材成本占40%` | 抽不到 | `variable_cost_ratio = 0.4` | R2 |
@@ -135,7 +135,7 @@ make test            # 期望 375+ passed, 0 failed（现基线 355）
 .venv/bin/python3 -m pytest tests/test_extractor_coverage.py -q
 
 # 3) 单位契约双向断言
-#    derive({"variable_cost_ratio":0.4})["gross_margin"]      == 0.4
+#    derive({"variable_cost_ratio":0.4})["gross_margin"]      == 0.6
 #    derive({"gross_margin":0.4})["variable_cost_ratio"]      == 0.6
 #    derive({"gross_margin":0.6})["variable_cost_ratio"]      == 0.4
 

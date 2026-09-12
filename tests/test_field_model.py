@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from field_model import (
-    DERIVED_SPECS, derive, consistency_issues, derived_values, _DERIVED_ORDER,
+    DERIVED_SPECS, INPUT_SPECS, derive, consistency_issues, derived_values, _DERIVED_ORDER,
 )
 
 
@@ -35,7 +35,7 @@ def test_fm1_full_derive():
     assert d["monthly_profit"] == 300          # 18000-7800-9900
     assert d["variable_cost_per_unit"] == 5.5  # 10×0.55
     assert d["annual_fixed_cost"] == 93600     # 7800×12
-    assert d["gross_margin"] == 45.0
+    assert d["gross_margin"] == 0.45            # S3：统一 0~1 口径（1 − 0.55）
     assert d["available_cash"] == 200000
     # meta 验证
     assert m["monthly_revenue"]["source"] == "derived"
@@ -88,13 +88,39 @@ def test_fm5_derived_values_shape():
 
 
 def test_fm6_formula_single_source():
-    """FM6：公式唯一出处——derive 与 derived_values 同源。"""
+    """FM6：公式唯一出处——derive 与 derived_values 同源（展示层按 display_percent ×100）。"""
     d, _ = derive(_FULL)
     dv = {x["field"]: x for x in derived_values(_FULL, {})}
     for field, val in d.items():
-        if field in dv:
-            assert dv[field]["value"] == round(val, 2) if isinstance(val, float) else val, field
+        if field not in dv or val is None:
+            continue
+        exp = val
+        if DERIVED_SPECS[field].get("display_percent") and isinstance(val, (int, float)):
+            exp = round(val * 100, 1)
+        assert dv[field]["value"] == (round(exp, 2) if isinstance(exp, float) else exp), field
     assert set(_DERIVED_ORDER) == set(DERIVED_SPECS.keys())
+
+
+def test_fm9_gross_margin_ratio_contract():
+    """FM9（S3）：gross_margin 与 variable_cost_ratio 统一为 0~1，双向闭合。
+
+    旧契约自相矛盾：INPUT_SPECS 声明 "%" 却在公式里 ÷100，
+    derive({"gross_margin": 0.6}) 算出 vcr=0.994（应为 0.4）。
+    """
+    assert abs(derive({"gross_margin": 0.4})[0]["variable_cost_ratio"] - 0.6) < 1e-9
+    assert abs(derive({"gross_margin": 0.6})[0]["variable_cost_ratio"] - 0.4) < 1e-9
+    assert abs(derive({"variable_cost_ratio": 0.4})[0]["gross_margin"] - 0.6) < 1e-9
+    assert DERIVED_SPECS["gross_margin"]["unit"] == "0~1"
+    assert INPUT_SPECS["gross_margin"]["unit"] == "0~1"
+
+
+def test_fm10_percent_fields_display_as_percent():
+    """FM10（S3）：内部 0~1 的比例字段，展示层 ×100 成百分数（视觉与旧版一致）。"""
+    dv = {x["field"]: x for x in derived_values(_FULL, {})}
+    gm = dv["gross_margin"]
+    assert gm["value"] == 45.0 and gm["unit"] == "%", gm
+    vcr = dv["variable_cost_ratio"]
+    assert vcr["value"] == 55.0 and vcr["unit"] == "%", vcr
 
 
 def test_fm7_fixed_cost_real_formula():
@@ -111,8 +137,8 @@ def test_fm8_vc_multi_path():
     d1, m1 = derive({"unit_variable_cost": 12, "price_per_unit": 15})
     assert abs(d1["variable_cost_ratio"] - 0.8) < 1e-9, d1
     assert m1["variable_cost_ratio"]["source"] == "derived"
-    # 1 - gross_margin
-    d2, m2 = derive({"gross_margin": 40})
+    # 1 - gross_margin（S3：gm 输入口径与变量同为 0~1）
+    d2, m2 = derive({"gross_margin": 0.4})
     assert abs(d2["variable_cost_ratio"] - 0.6) < 1e-9, d2
     # 全缺 → None
     d3, m3 = derive({})
