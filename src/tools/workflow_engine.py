@@ -247,33 +247,34 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         raw_params.get("price_per_unit"),
         "[用户]" if raw_params.get("price_per_unit") is not None else "[缺失] 未提供")
 
-    # 变动成本率：优先用 variable_cost_ratio（_extract_cost_ratio 精确解析的比例 0~1）；
+    # ── 变动成本率：公式唯一出处 = field_model.derive()（S4 收敛）──
+    # 本处只做两件事：① 原始输入解析（单位归一）；② 来源标注。
+    # 旧实现手写了**第二份**四路推导（user > unit_var÷price > 1−gm > None），
+    # 与 field_model.DERIVED_SPECS["variable_cost_ratio"] 的公式重复、必须人工同步，
+    # 是「公式唯一出处」契约名存实亡的根因。
     # variable_cost_rate 是通用字段，可能误抓相邻客流数字（如「日售50杯变动成本率55%」）。
     user_vc = raw_params.get("variable_cost_ratio")
     if user_vc is None:
         user_vc = raw_params.get("variable_cost_rate")
     user_gm = raw_params.get("gross_margin")
     user_unit_var = raw_params.get("unit_variable_cost")
+
     if user_vc is not None:
         vc = float(user_vc)
-        # 兼容 40(%) 和 0.4(比例) 两种输入
-        normalized = vc / 100 if vc > 1 else vc
-        p["variable_cost_ratio"] = _set("variable_cost_ratio", normalized, "[用户]")
-    elif user_unit_var is not None and p["price_per_unit"]:
-        # P4-1：单位变动成本 ÷ 客单价 → 推导变动率（如「每份成本12元」÷「客单价15」= 0.80）
-        ratio = float(user_unit_var) / p["price_per_unit"]
-        p["variable_cost_ratio"] = _set("variable_cost_ratio", ratio, "[推导] 单位变动成本÷客单价")
-    elif user_gm is not None:
-        # S3（2026-09-12）：gross_margin 统一为 0~1 口径（param_guard 已在抽取出口归一）。
-        # 删除旧的 `gm/100 if gm > 1 else gm` —— 用「值大小」猜单位本身不成立：
-        # 0.4（40%）与 40（40倍）都是合法值，猜不出。旧代码在主链路「恰好正确」
-        # 只是因为 guard 已把 60 归一成 0.6，属脆弱巧合。
-        p["variable_cost_ratio"] = _set(
-            "variable_cost_ratio", 1 - float(user_gm), "[推算] 从用户毛利率反推")
+        # 输入解析：兼容 40(%) 与 0.4(比例) 两种写法（单位归一，不是公式）
+        p["variable_cost_ratio"] = vc / 100 if vc > 1 else vc
+        src["variable_cost_ratio"] = "[用户]"
     else:
-        # D2：取消「输入伪造型默认」。变动成本率没给/没推导 → 缺失，
-        # 不再静默用行业模板填进计算图（会撑起假硬利润）；作假设候选待确认。
-        p["variable_cost_ratio"] = _set("variable_cost_ratio", None, "[缺失] 未提供(按未知计)")
+        # D2：取消「输入伪造型默认」。没给/推不出 → 缺失，不静默用行业模板填进
+        # 计算图（会撑起假硬利润）；作假设候选待确认。
+        p["variable_cost_ratio"] = None
+        src["variable_cost_ratio"] = "[缺失] 未提供(按未知计)"
+        # 把模型的推导依赖放进 p，交给 derive() 统一求值。
+        # 用户已直给 vcr 时不放，沿用旧的优先级语义（显式值不被推导依赖干扰）。
+        if user_unit_var is not None:
+            p["unit_variable_cost"] = float(user_unit_var)
+        if user_gm is not None:
+            p["gross_margin"] = float(user_gm)
 
     # ── 人员参数（无默认：人数/薪资没给即 [缺失]，不填 0）──
     user_staff = raw_params.get("employee_count", raw_params.get("staff_count"))
@@ -522,12 +523,29 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
     for fld, (ok_src, miss_src) in _src_map.items():
         if fld == "monthly_profit":
             continue  # 上面已处理
-        if p.get(fld) is not None:
+        if fld == "gross_margin" and user_vc is None and user_gm is not None:
+            # S4：用户直给毛利率时它是输入项，不是「1−变动成本率」的推算结果
+            src[fld] = "[用户]"
+        elif p.get(fld) is not None:
             src[fld] = ok_src
         elif miss_src:
             src[fld] = miss_src
         else:
             src[fld] = "[缺失] 未提供"
+
+    # ── 变动成本率 src 标注（值已由 derive() 按公式唯一出处算出）──
+    # 文案与旧版保持一致：敏感度区间逻辑按 "[推算]" 前缀识别（见 _build_scenarios），
+    # 改文案会静默改变 what-if 区间行为。
+    if src.get("variable_cost_ratio") != "[用户]":
+        if p.get("variable_cost_ratio") is None:
+            src["variable_cost_ratio"] = "[缺失] 未提供(按未知计)"
+        elif user_unit_var is not None and p.get("price_per_unit"):
+            src["variable_cost_ratio"] = "[推导] 单位变动成本÷客单价"
+        elif user_gm is not None:
+            src["variable_cost_ratio"] = "[推算] 从用户毛利率反推"
+        else:
+            src["variable_cost_ratio"] = "[推算] 公式推导"
+
     p["benchmark"] = tpl["benchmark"]
     # 行业典型成本结构占比（租金/包装/营销/人工/其他），用于差异化参考
     p["cost_structure"] = tpl.get("cost_structure", {})

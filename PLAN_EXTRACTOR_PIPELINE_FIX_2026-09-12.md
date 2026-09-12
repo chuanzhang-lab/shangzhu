@@ -149,7 +149,12 @@ make test            # 期望 375+ passed, 0 failed（现基线 355）
 #    「月营收5万，月租金1万5，食材成本占4成」→ 月租金 15000、vcr 0.4
 
 # 6) 结构断言（公式唯一出处）
-#    workflow_engine 中不再出现手写 vcr 推导（grep '从用户毛利率反推' 应为 0）
+#    workflow_engine 中不再出现手写 vcr 推导：
+#      grep 'gm_ratio'                       应为 0（单位猜测变量）
+#      grep 'float(user_unit_var) / p["price_per_unit"]'  应为 0（手写 unit_var÷price 分支）
+#      grep '1 - float(user_gm)'             应为 0（手写 1−毛利率 分支）
+#    注：来源标注文案 "[推算] 从用户毛利率反推" **保留**（敏感度区间按 "[推算]" 前缀识别，
+#    见 _build_scenarios），故不能用该文案作为「公式已删」的判据。
 ```
 
 ---
@@ -161,7 +166,7 @@ make test            # 期望 375+ passed, 0 failed（现基线 355）
 | **S1** | 新增 `tests/test_extractor_coverage.py` 措辞矩阵 oracle（**先写测试，当前应红**） | 无 | 观察红灯数量 = 待修缺口数 | 删文件 |
 | **S2** | 抽取器 4 项修复（E1~E5），**只动 `param_extractor.py`** | S1 | `pytest tests/test_extractor_coverage.py` 全绿 + `make test` 355 不变 | `git revert` |
 | **S3** | `gross_margin` 单位统一（`field_model.py` + `workflow_engine.py` 消费点） | S2 | 单位契约双向断言 + 端到端月利润仍 22000 + 全量 | `git revert` |
-| **S4** | `variable_cost_ratio` 推导收敛进 `field_model`，删 `workflow_engine` 手写份 | S3 | `grep '从用户毛利率反推'` = 0 + 全量 + 端到端 | `git revert` |
+| **S4** | `variable_cost_ratio` 推导收敛进 `field_model`，删 `workflow_engine` 手写份 | S3 | 结构断言（`gm_ratio` / 手写分支 = 0）+ 全量 + 端到端 | `git revert` |
 
 **说明**：S3 与 S4 分开提交，是因为前者是「改口径」（风险面宽、收益是修错），
 后者是「改结构」（收益是去重）。合并提交会让回滚粒度变粗。

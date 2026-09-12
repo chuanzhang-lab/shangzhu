@@ -123,6 +123,22 @@ def test_fm10_percent_fields_display_as_percent():
     assert vcr["value"] == 55.0 and vcr["unit"] == "%", vcr
 
 
+def test_fm11_vc_derivation_defined_only_in_model():
+    """FM11（S4）：变动成本率的推导公式只存在于 field_model，引擎不手写第二份。
+
+    旧实现在 workflow_engine 里手写了一条并行的四路推导
+    （user > unit_var÷price > 1−gm > None），与 DERIVED_SPECS 的公式重复，
+    改一处必须记得改另一处 —— 结构断言防复发。
+    """
+    import inspect
+    import tools.workflow_engine as we
+    code = inspect.getsource(we)
+    assert "gm_ratio" not in code, "单位猜测变量 gm_ratio 仍在引擎里"
+    assert "1 - gm_ratio" not in code
+    assert 'float(user_unit_var) / p["price_per_unit"]' not in code, "手写的 unit_var÷price 分支仍在"
+    assert "1 - float(user_gm)" not in code, "手写的 1−毛利率 分支仍在"
+
+
 def test_fm7_fixed_cost_real_formula():
     """FM7：monthly_fixed_cost 真公式——只给租金也能算出。"""
     d, _ = derive({"monthly_rent": 8000})
