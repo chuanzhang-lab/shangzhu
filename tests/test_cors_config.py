@@ -51,6 +51,19 @@ def test_cors_allows_whitelisted():
     assert "localhost" in acao, f"CORS doesn't allow localhost: {acao}"
 
 
+def test_cors_allows_service_default_port():
+    """白名单必须覆盖服务默认端口——守护 README / start.sh / web_server 三方端口一致性。
+
+    历史缺陷：服务默认端口是 8081，CORS 白名单却只写 8080，换端口后跨源调用被拦。
+    """
+    import web_server as ws
+    port = os.environ.get("PORT", "8081")
+    assert f"http://127.0.0.1:{port}" in ws._ALLOWED_ORIGINS, (
+        f"服务默认端口 {port} 不在 CORS 白名单: {ws._ALLOWED_ORIGINS}"
+    )
+    assert f"http://localhost:{port}" in ws._ALLOWED_ORIGINS
+
+
 def test_post_requires_xhr():
     """POST 请求缺少 X-Requested-With 头时返回 403。"""
     client = _make_client()
@@ -72,6 +85,8 @@ if __name__ == "__main__":
     print("test_cors_blocks_evil_origin: PASS")
     test_cors_allows_whitelisted()
     print("test_cors_allows_whitelisted: PASS")
+    test_cors_allows_service_default_port()
+    print("test_cors_allows_service_default_port: PASS")
     test_post_requires_xhr()
     print("test_post_requires_xhr: PASS")
     test_post_with_xhr_works()

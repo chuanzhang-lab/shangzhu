@@ -1,6 +1,6 @@
 # 创业者商业建模工作台
 
-**版本：v0.1.0** — 本版本将大模型设为交互助手并添加了功能 `aab3a12`
+**版本：v0.1.0** — 大模型定位为交互助手（Engine Steward：只读、接地真实项目背景）；业务意图 0 次 LLM 调用。
 
 把早期创业者的稀疏 / 未知参数，从「算出一个确定性答案」转变为「说清我们知道什么、猜了什么、缺什么」。薄规则引擎（0 次 LLM 调用业务意图）+ 置信层（来源标注 `[用户]/[默认]/[推算]/[缺失]`）+ 只读 LLM 协作层（Engine Steward）。
 
@@ -38,7 +38,7 @@ gh repo clone chuanzhang-lab/claude && cd claude && bash setup.sh
 3. 生成 `config/agent_llm_config.json` 与 `config/storage.json`（两者被 gitignore，新克隆必然缺失）
 4. 导入冒烟（提前暴露依赖问题，不半途启动）
 5. 初始化 PostgreSQL（**可选**：检测不到 PG 时跳过，服务自动降级内存存储，不崩）
-6. 跑测试（**270 passed**）
+6. 跑测试（**355 passed / 0 failed**，pytest 全量收集 `tests/` 全部 33 个文件）
 
 ### 可选参数
 
@@ -70,6 +70,7 @@ uv sync
 
 # 2. 配置模型（可选；未配置时规则引擎照常工作，AI 解读自动跳过）
 #    编辑 config/agent_llm_config.json 填入 model / base_url / api_key
+#    （模板见 config/agent_llm_config.json.example）
 #    或启动后直接在网页右上角的设置入口里填写
 
 # 3. 初始化数据库（可选，会话/任务持久化用）
@@ -77,7 +78,7 @@ uv sync
 
 # 4. 启动服务（默认端口 8081）
 ./start.sh
-# 换端口：PORT=8000 ./start.sh   （注意：不是 -p 参数）
+# 换端口：PORT=9000 ./start.sh   （start.sh 读 PORT 环境变量，不是 -p 参数）
 ```
 
 > 会话/任务持久化依赖本机 PostgreSQL（默认 `localhost:5432/shangzhu`，可用 `PGDATABASE_URL` 覆盖）。PG 不可用时自动降级为进程内内存存储，服务不崩，但重启后会话丢失。
@@ -89,7 +90,7 @@ uv sync
 - `PUT /tasks/{id}/rename` 任务改名
 - `GET /tasks/{id}/messages` 任务历史
 - `DELETE /tasks/{id}` 归档任务（软删，历史保留）
-- 日志输出到 `logs/web_server.log`（同时保留控制台输出）
+- 日志输出到 `logs/shangzhu.log`（路径由 `start.sh` 指定；同时保留控制台输出）
 
 > 注：`start.sh` 只启动 (A)。Coze 平台服务 (B) 依赖已从本仓移除，如需平台端服务应在 Coze 平台环境另行部署。
 
@@ -97,10 +98,11 @@ uv sync
 ## 工程命令（可选）
 
 ```bash
-make test      # 全量引擎层回归
-make smoke     # 导入 + 路由冒烟
+make test      # 交付门禁：pytest 全量收集 tests/ 全部 33 个文件
+make smoke     # 导入 + 路由冒烟（不启服务）
 make compile   # 字节码编译检查
-make start     # 等价 ./start.sh -p 8000
+make start     # 启动服务（默认 8081，等价 PORT=8081 ./start.sh）
+make health    # curl /health（需服务已启动）
 ```
 
 ## 工程化边界
@@ -118,8 +120,8 @@ make start     # 等价 ./start.sh -p 8000
 - **交互状态可观测（F5）**：导出前校验参数完整性（缺营收/变动成本/固定成本则提示并拦截）；新建任务失败给红字反馈；任务改名带成功/失败 toast。
 
 ## 配置
-- 模型：**单源**为 `config/agent_llm_config.json` 的 `config.model`（`base_url` / `api_key` 同在此文件，三者同源以避免跨厂商错配）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。该文件被 gitignore，**README 不写死具体模型名**（否则换模型必漂移），本地实际值以上述配置文件为准；代码层 fallback 默认值见 `config/settings.py` 与 `src/llm_advisor.py`。
-- 数据库：默认 `postgresql://newmacbook@localhost:5432/shangzhu`。可通过以下方式覆盖：
+- 模型：**单源**为 `config/agent_llm_config.json` 的 `config.model`（`base_url` / `api_key` 同在此文件，三者同源以避免跨厂商错配）。改这一处即全局生效——`/health`、首页页脚、启动日志、Engine Steward 均从此读取，无第二处硬编码。该文件被 gitignore，**README 不写死具体模型名**（否则换模型必漂移），本地实际值以上述配置文件为准；代码层 fallback 默认值见 `config/settings.py` 与 `src/llm_advisor.py`。模板见 `config/agent_llm_config.json.example`（复制为 `agent_llm_config.json` 后填写，`setup.sh` 也会自动生成占位文件）。
+- 数据库：默认 `postgresql://<系统用户名>@localhost:5432/shangzhu`。可通过以下方式覆盖：
   - 环境变量 `PGDATABASE_URL`（最高优先级）
   - `config/storage.json` 中的 `db_url` 字段（中等优先级，文件被 gitignore）
   - `config/storage.json.example` 为模板文件，复制为 `storage.json` 后修改即可
@@ -132,16 +134,18 @@ make start     # 等价 ./start.sh -p 8000
   3. macOS Keychain（service=`shangzhu-llm`, account=`api_key`）
   4. 空串（未配置）
 - env / Keychain 仅在 config 未写 key 时兜底；若需用环境变量覆盖 config，请先清空设置页的 key。
-- **CORS**：白名单限制为 `http://127.0.0.1:8080` 和 `http://localhost:8080`，POST 类操作要求 `X-Requested-With` 头防 CSRF。
+- **CORS**：白名单跟随实际服务端口（`PORT` 环境变量，默认 `8081`），并保留历史端口 `8080`；即 `http://127.0.0.1:{8081,8080}` 与 `http://localhost:{8081,8080}`。POST 类操作要求 `X-Requested-With` 头防 CSRF。
 - **配置文件权限**：`config/storage.json` 和 `config/agent_llm_config.json` 均为 `600`，不会被 git 跟踪。
 - **备份**：定期执行 `./scripts/backup_db.sh shangzhu` 备份数据库，备份文件在 `backups/` 目录，自动保留最近 7 份。
 
 ## 测试（仅覆盖 A：本地引擎层）
 
 ```bash
-.venv/bin/python3 tests/run_all.py
+make test          # 交付门禁：pytest 全量收集 tests/ 全部 33 个文件
+# 等价：.venv/bin/python3 -m pytest tests/ -q
 ```
-- 测试只覆盖**本地引擎层 (A)**：`router`(参数抽取/意图) → `session_state`(跨轮 merge) → `workflow_engine`(quick_scan) → `financial_calculator` → `formatter` → `llm_advisor`(Engine Steward) 全链路，以及 12 轮羊肉汤店对话集成 oracle。另含本地存储层（`test_local_store`）与任务 CRUD API（`test_task_api`）。当前全量 **270 用例**（含 2026-08-19 新增的 trend 统一降级与 None 防御回归、2026-08-21 资源泄漏修复回归、2026-08-28 顾问面板与前端交互修复回归、2026-09-05 并发/安全/资源生命周期修复回归）。
+- 测试只覆盖**本地引擎层 (A)**：`router`(参数抽取/意图) → `session_state`(跨轮 merge) → `workflow_engine`(quick_scan) → `financial_calculator` → `formatter` → `llm_advisor`(Engine Steward) 全链路，以及 12 轮羊肉汤店对话集成 oracle。另含本地存储层（`test_local_store`）与任务 CRUD API（`test_task_api`）。当前全量 **355 用例 / 0 failed**（含 2026-08-19 新增的 trend 统一降级与 None 防御回归、2026-08-21 资源泄漏修复回归、2026-08-28 顾问面板与前端交互修复回归、2026-09-05 并发/安全/资源生命周期修复回归、2026-09-12 成本归因 / 行业季节性 / 收入序列回归）。
+- **门禁统一为 pytest**：`tests/run_all.py` 基于 `vars(mod)` 只扫**模块级**函数，`class TestXxx` 内的用例永远收集不到（曾导致「25/33 文件、270 passed」的假绿灯）。该脚本现仅作**无 pytest 环境的轻量后备**：已补齐类方法收集与全部 33 个文件的注册，并把需要 pytest fixture（`client` / `monkeypatch`）的 24 个用例**显式记为 `SKIP`**（不并入通过数，也不误报失败）→ 其后备口径 331 passed + 24 skipped，与 pytest 全量 355 完全对齐。
 - **不覆盖 (B) Coze 路径**：该路径已从本仓移除；解耦由 `tests/test_phase4_workbench.py` 的 `test_p48_*` 硬性守护（断言 `web_server.py` 不得 import `agents.agent` / `build_agent` / `get_agent`）。
 
 ## 依赖分组（clone 后注意）
@@ -164,9 +168,13 @@ uv sync                # 默认只装主依赖（A 必需），不碰重型平�
 uv sync --extra coze-platform
 ```
 
-> 注：本仓已附完整 `.venv`（含全部依赖），直接 `./start.sh` 即可运行，无需重新 sync。
+> 注：`.venv` **不在版本库里**（`.gitignore` 忽略），新克隆必须跑一次 `bash setup.sh` 或 `uv sync` 生成，不能直接 `./start.sh`。
 
-## 本地 Agent 冒烟测试
+## 冒烟检查
+
 ```bash
-.venv/bin/python local_test.py        # 打印真实模型配置并跑一条示例对话（需 DEEPSEEK_API_KEY）
+make smoke                        # 导入 + /health 路由结构（不启服务）
+curl http://127.0.0.1:8081/health # 服务已启动时：status / model / version / store_backend
 ```
+
+规则引擎不依赖 API Key；未配置 `api_key` 时引擎与前端照常工作，仅 AI 解读自动跳过（`/health` 的 `llm_configured` 为 `false`）。

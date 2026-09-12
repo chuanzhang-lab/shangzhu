@@ -1,20 +1,27 @@
+# ── 前端构建产物（如后续引入 npm 工具链时生效）─────────────────
 node_modules
 dist
+/vendor
+
+# ── 系统 / 编辑器 ──────────────────────────────────────────────
 .DS_Store
 *.swp
-.git/*
+
+# ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+*.egg-info/
 .venv
+
+# ── 原生编译产物 ──────────────────────────────────────────────
 *.o
 *.a
-/vendor
-*.egg-info/
-/.env
-.env
-.cozeproj/reduction
 
-# 视频文件
+# ── 环境变量 ──────────────────────────────────────────────────
+.env
+/.env
+
+# ── 大体积媒体（不入库）───────────────────────────────────────
 *.mp4
 *.avi
 *.mov
@@ -30,57 +37,42 @@ __pycache__/
 *.rmvb
 *.vob
 
-# 归档文件
+# ── 归档文件 ──────────────────────────────────────────────────
 *.iso
 *.dmg
 *.rar
 *.zip
 *.gz
 
-# 文档类也默认加入
+# ── Office / 文档产物（含用户财务数据，不入库）─────────────────
 *.pdf
 *.docx
 *.doc
-*.xlsx
 *.xls
+*.xlsx
 *.ppt
 *.pptx
-*.xlsx
 *.csv
 
-# Preview files
-.preview
-
-# CodeGraph index
-.codegraph
-
-# 测试/运行产物
+# ── 测试 / 运行产物 ────────────────────────────────────────────
 .pytest_cache/
 .coverage
-web_server.log
 *.log
 logs/
 reports/
+output/
 
-# 含 API Key 的配置文件
+# ── 含密钥 / 用户专属配置（同目录 *.example 模板例外，正常入库）──
 config/agent_llm_config.json
-
-# 本地存储配置（用户专属，含连接串）
 config/storage.json
 
-# 外部工具元数据
+# ── 本地工具元数据 ────────────────────────────────────────────
 .workbuddy/
 .hermes/
 .codegraph/
+.codegraph
+.preview
+.cozeproj/reduction
 
-# 测试产物
-.pytest_cache/
-.coverage
-web_server.log
-*.log
-logs/
-reports/
-
-# 遗留备份文件不入库
+# ── 遗留备份文件 ──────────────────────────────────────────────
 *.bak*
-web_server.py.bak_m3

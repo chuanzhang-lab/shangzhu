@@ -65,40 +65,47 @@ def _main():
     # ── F1: config 并发保存（不同字段）──
     from config import settings as cfgmod
 
-    with tempfile.TemporaryDirectory() as td:
-        cfgmod.CONFIG_PATH = type(cfgmod.CONFIG_PATH)(td) / "llm.json"
-        base = {"config": {"model": "m0", "base_url": "https://a.b/v1", "api_key": "sk-000000000",
-                           "temperature": 0.3, "timeout": 60}}
-        ok, msg = cfgmod.save(base)
-        assert ok, msg
-        # 线程 A 只改 model，线程 B 只改 base_url，各 30 次。
-        # 审查修复 F1：读-改-写必须用 update_config（锁内原子）。
-        # 旧模式「锁外 load() + save()」存在丢失更新窗口，已弃用。
-        def save_model(i):
-            cfgmod.update_config(lambda inner: inner.update({"model": f"model-A-{i}"}))
-        def save_url(i):
-            cfgmod.update_config(lambda inner: inner.update({"base_url": f"https://B-{i}.x/v1"}))
-        errs2 = []
-        def run_a():
-            try:
-                for i in range(30): save_model(i)
-            except Exception as e: errs2.append(f"A: {e}")
-        def run_b():
-            try:
-                for i in range(30): save_url(i)
-            except Exception as e: errs2.append(f"B: {e}")
-        ta, tb = threading.Thread(target=run_a), threading.Thread(target=run_b)
-        ta.start(); tb.start(); ta.join(); tb.join()
-        assert not errs2, f"F1 FAIL: {errs2[:2]}"
-        final_cfg = cfgmod.load()["config"]
-        a_last = final_cfg["model"].startswith("model-A-")
-        b_last = final_cfg["base_url"].startswith("https://B-")
-        # 锁修复后：两个线程的最终写入都应保留（最后一次写入的一方完整保留自己的字段，
-        # 且另一字段不被回滚到初始值——因每次 save 前的 load 都读到最新）
-        assert a_last and b_last, f"F1 FAIL: 丢失更新 model={final_cfg['model']} url={final_cfg['base_url']}"
-        # JSON 完整性
-        json.dumps(final_cfg)
-        print(f"F1 config 并发保存: model={final_cfg['model']} url={final_cfg['base_url'][:18]}... 两字段共存 OK")
+    # CONFIG_PATH 是模块级常量：测试期间重定向到临时文件，
+    # 结束后必须恢复——否则同进程后续测试（如 test_llm_settings 的
+    # /settings/llm 端点）会读到已删除的临时路径，静默落入默认配置。
+    _orig_config_path = cfgmod.CONFIG_PATH
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            cfgmod.CONFIG_PATH = type(cfgmod.CONFIG_PATH)(td) / "llm.json"
+            base = {"config": {"model": "m0", "base_url": "https://a.b/v1", "api_key": "sk-000000000",
+                               "temperature": 0.3, "timeout": 60}}
+            ok, msg = cfgmod.save(base)
+            assert ok, msg
+            # 线程 A 只改 model，线程 B 只改 base_url，各 30 次。
+            # 审查修复 F1：读-改-写必须用 update_config（锁内原子）。
+            # 旧模式「锁外 load() + save()」存在丢失更新窗口，已弃用。
+            def save_model(i):
+                cfgmod.update_config(lambda inner: inner.update({"model": f"model-A-{i}"}))
+            def save_url(i):
+                cfgmod.update_config(lambda inner: inner.update({"base_url": f"https://B-{i}.x/v1"}))
+            errs2 = []
+            def run_a():
+                try:
+                    for i in range(30): save_model(i)
+                except Exception as e: errs2.append(f"A: {e}")
+            def run_b():
+                try:
+                    for i in range(30): save_url(i)
+                except Exception as e: errs2.append(f"B: {e}")
+            ta, tb = threading.Thread(target=run_a), threading.Thread(target=run_b)
+            ta.start(); tb.start(); ta.join(); tb.join()
+            assert not errs2, f"F1 FAIL: {errs2[:2]}"
+            final_cfg = cfgmod.load()["config"]
+            a_last = final_cfg["model"].startswith("model-A-")
+            b_last = final_cfg["base_url"].startswith("https://B-")
+            # 锁修复后：两个线程的最终写入都应保留（最后一次写入的一方完整保留自己的字段，
+            # 且另一字段不被回滚到初始值——因每次 save 前的 load 都读到最新）
+            assert a_last and b_last, f"F1 FAIL: 丢失更新 model={final_cfg['model']} url={final_cfg['base_url']}"
+            # JSON 完整性
+            json.dumps(final_cfg)
+            print(f"F1 config 并发保存: model={final_cfg['model']} url={final_cfg['base_url'][:18]}... 两字段共存 OK")
+    finally:
+        cfgmod.CONFIG_PATH = _orig_config_path
 
     print("\n=== 并发修复验证全部通过 ===")
 

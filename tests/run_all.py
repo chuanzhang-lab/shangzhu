@@ -1,4 +1,7 @@
-"""统一测试运行器（无需 pytest）。
+"""统一测试运行器（无需 pytest）——**后备门禁**。
+
+⚠️ 交付门禁是 `make test`（= `pytest tests/` 全量收集）。
+   本脚本只在没有 pytest 的环境下作轻量后备使用。
 
 运行：
     .venv/bin/python3 tests/run_all.py
@@ -19,8 +22,13 @@
     project_manager 解析器去重），用隔离子进程 stub langchain.tools 验证，
     不依赖平台运行时，不覆盖 B 路径的 agent 编排 / 存储 / 平台服务。
 
+    覆盖度限制（重要）：带 `client` / `monkeypatch` 等 **pytest fixture 形参** 的用例，
+    本运行器无法注入，会显式标记为 `SKIP`（单列计数、不并入 passed），
+    因此本脚本的通过数**少于** pytest 全量。交付门禁请用 `make test`。
+
 各测试文件本身也可单独运行 / 被 pytest 收集。
 """
+import inspect
 import sys
 import os
 
@@ -51,16 +59,59 @@ import test_config_priority as t21
 import test_direction_2_4 as t22
 import test_direction_5_1 as t23
 import test_concurrency_fixes as t24
+# 以下 8 个曾游离在门禁之外（新增功能因此没有回归保护），现已全部注册
+import test_advisor_endpoints as t25
+import test_advisor_formatter as t26
+import test_cors_config as t27
+import test_cost_attribution as t28
+import test_industry_seasonal as t29
+import test_llm_settings as t30
+import test_simulator_upgrade as t31
+import test_vc_consistency as t32
+
+
+def _bind(cls, fn):
+    """把类方法绑定到实例；需要 pytest fixture 的用例返回 None（由调用方记为 SKIP）。
+
+    修复两个历史缺陷：
+    1. 原实现只用 vars(mod) 扫模块级函数，`class TestXxx` 里的用例
+       （advisor / llm_settings / simulator_upgrade 等）永远收集不到
+       —— 这正是「25/33 个文件、270 passed」假绿灯的根因。
+    2. 若把类方法一律直接调用，带 `client` / `monkeypatch` 形参的用例会抛
+       TypeError 变成「假红」。这类用例必须交给 pytest，故此处显式识别并跳过。
+    """
+    extra = [p for p in inspect.signature(fn).parameters.values() if p.name != "self"]
+    if extra:
+        return None
+
+    def runner():
+        inst = cls()
+        return fn(inst)
+    return runner
+
+
+def _collect(mod):
+    """收集模块内全部用例：模块级 test_* 函数 + class Test* 内的 test_* 方法。"""
+    items = []
+    for name, obj in vars(mod).items():
+        if name.startswith("test_") and callable(obj):
+            items.append((name, obj))
+        elif isinstance(obj, type) and name.startswith("Test"):
+            for mname, mfn in vars(obj).items():
+                if mname.startswith("test_") and callable(mfn):
+                    items.append((f"{name}::{mname}", _bind(obj, mfn)))
+    return sorted(items, key=lambda kv: kv[0])
 
 
 def _run_module(mod, label):
-    funcs = sorted(
-        (n, f) for n, f in vars(mod).items()
-        if n.startswith("test_") and callable(f)
-    )
-    passed = failed = 0
+    funcs = _collect(mod)
+    passed = failed = skipped = 0
     print(f"\n── {label}（{len(funcs)} 用例）──")
     for name, fn in funcs:
+        if fn is None:
+            print(f"  SKIP {name}  ← 需 pytest fixture，本运行器无法注入")
+            skipped += 1
+            continue
         try:
             fn()
             print(f"  PASS {name}")
@@ -71,11 +122,11 @@ def _run_module(mod, label):
         except Exception as e:  # noqa
             print(f"  ERROR {name}: {e!r}")
             failed += 1
-    return passed, failed
+    return passed, failed, skipped
 
 
 if __name__ == "__main__":
-    total_p = total_f = 0
+    total_p = total_f = total_s = 0
     for mod, label in (
         (t0, "Phase 0 · 置信层 + 门禁"),
         (t1, "Phase 1 · 灵活度层"),
@@ -102,9 +153,21 @@ if __name__ == "__main__":
         (t22, "Direction2_4 · 方向2.4/2.5"),
         (t23, "Direction5_1 · 方向5.1"),
         (t24, "Concurrency · 并发安全修复守护"),
+        (t25, "AdvisorEndpoints · 顾问端点（类方法风格）"),
+        (t26, "AdvisorFormatter · 顾问格式化（类方法风格）"),
+        (t27, "CorsConfig · CORS 白名单 + POST 防 CSRF"),
+        (t28, "CostAttribution · 成本归因 + 敏感性（类方法风格）"),
+        (t29, "IndustrySeasonal · 行业季节性模板（类方法风格）"),
+        (t30, "LlmSettings · LLM 配置读写（类方法风格）"),
+        (t31, "SimulatorUpgrade · 收入序列 / 投资指标（类方法风格）"),
+        (t32, "VcConsistency · 变动成本率一致性"),
     ):
-        p, f = _run_module(mod, label)
+        p, f, s = _run_module(mod, label)
         total_p += p
         total_f += f
-    print(f"\n==== 总计: {total_p} passed, {total_f} failed ====")
+        total_s += s
+    print(f"\n==== 总计: {total_p} passed, {total_f} failed, {total_s} skipped ====")
+    if total_s:
+        print(f"⚠️  有 {total_s} 个用例需 pytest fixture，本后备运行器无法执行（已显式跳过，未计入通过）。")
+        print("   交付门禁请使用：make test   （= pytest tests/ 全量收集）")
     sys.exit(1 if total_f else 0)

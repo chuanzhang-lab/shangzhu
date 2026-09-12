@@ -1,0 +1,11 @@
+{
+  "config": {
+    "model": "",
+    "base_url": "",
+    "api_key": "",
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "max_completion_tokens": 10000,
+    "timeout": 60
+  }
+}

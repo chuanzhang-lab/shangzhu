@@ -2,8 +2,8 @@
 创业者工作台 — 本地 Web 启动入口
 独立 FastAPI 服务，避开 Coze 平台依赖
 
-启动: python web_server.py
-访问: http://localhost:8080
+启动: ./.venv/bin/python web_server.py   （默认端口 8081）
+访问: http://localhost:8081
 
 架构：
   用户输入
@@ -734,8 +734,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="创业者工作台", lifespan=lifespan)
 
-# CORS：收紧为白名单，避免任意恶意站点跨站操作
-_ALLOWED_ORIGINS = ["http://127.0.0.1:8080", "http://localhost:8080"]
+# CORS：收紧为白名单，避免任意恶意站点跨站操作。
+# 白名单跟随实际服务端口（PORT 环境变量，默认 8081，与 start.sh / argparse 默认值同源），
+# 并保留历史端口 8080——否则默认端口启动时跨端口调试会被 CORS 拦掉（端口三方不一致的残留）。
+_SERVICE_PORT = os.environ.get("PORT", "8081")
+_ALLOWED_ORIGINS = [
+    f"http://127.0.0.1:{_SERVICE_PORT}",
+    f"http://localhost:{_SERVICE_PORT}",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,

@@ -15,9 +15,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from tools.workflow_engine import (
     _project_trend_12m,
     _fill_and_assess,
+    _get_industry_seasonal_profile,
     compare_scenarios,
     quick_scan,
 )
+
+
+def _season(params: dict, month: int) -> float:
+    """动态读取行业季节系数——断言应校验「引擎正确应用模板系数」，
+    而非写死某个数值（模板调整时测试不再误报）。"""
+    return _get_industry_seasonal_profile(params.get("industry_name", "")).get(month, 1.0)
 
 
 # ─── S1: 收入序列支持 ─────────────────────────────────────────────────────
@@ -40,8 +47,8 @@ class TestRevenueSeries:
         assert result["input_mode"] == "growth_rate"
         assert result["months_count"] == 12
         assert len(result["months"]) == 12
-        # 增长率 10%，第1月应有季节因子 0.85
-        assert result["months"][0]["revenue"] == round(30000 * 0.85, 0)
+        # 第1月 = 30000 × 餐饮1月季节系数（模板值，动态读取）
+        assert result["months"][0]["revenue"] == round(30000 * _season(params, 1), 0)
 
     def test_series_mode_basic(self):
         """收入序列模式：5 期序列，默认延续到 12 期。"""
@@ -57,9 +64,9 @@ class TestRevenueSeries:
         assert result["input_mode"] == "series"
         assert result["months_count"] == 12  # 默认延续到 12 期
         assert len(result["months"]) == 12
-        # 前 5 期使用用户序列值
-        assert result["months"][0]["revenue"] == round(30000 * 0.85, 0)
-        assert result["months"][4]["revenue"] == round(90000 * 1.05, 0)
+        # 前 5 期使用用户序列值 × 对应月份季节系数
+        assert result["months"][0]["revenue"] == round(30000 * _season(params, 1), 0)
+        assert result["months"][4]["revenue"] == round(90000 * _season(params, 5), 0)
 
     def test_series_mode_first_value(self):
         """收入序列：第一个值应正确。"""
@@ -72,8 +79,8 @@ class TestRevenueSeries:
             "industry_name": "餐饮",
         }
         result = _project_trend_12m(params)
-        # 第1月收入 = 30000 * seasonal(1月=0.85) = 25500
-        assert result["months"][0]["revenue"] == 25500.0
+        # 第1月收入 = 30000 × 餐饮1月季节系数（模板值，动态读取）
+        assert result["months"][0]["revenue"] == round(30000 * _season(params, 1), 0)
 
     def test_series_with_post_growth(self):
         """收入序列：序列用完后按 growth_rate 延续。"""
@@ -87,8 +94,8 @@ class TestRevenueSeries:
             "industry_name": "餐饮",
         }
         result = _project_trend_12m(params)
-        # 第3月：45000 * (1+0.1)^1 * seasonal(3月=1.0) = 49500
-        assert result["months"][2]["revenue"] == round(45000 * 1.1 * 1.0, 0)
+        # 第3月 = 45000 × (1+0.1)^1 × 餐饮3月季节系数（模板值，动态读取）
+        assert result["months"][2]["revenue"] == round(45000 * 1.1 * _season(params, 3), 0)
 
     def test_custom_analysis_months(self):
         """analysis_months 参数生效。"""

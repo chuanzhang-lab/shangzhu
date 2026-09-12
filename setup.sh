@@ -76,23 +76,14 @@ mkdir -p config
 
 if [ -f "config/agent_llm_config.json" ]; then
   ok "config/agent_llm_config.json 已存在，保留原值"
-else
-  cat > config/agent_llm_config.json <<'JSON'
-{
-  "config": {
-    "model": "",
-    "base_url": "",
-    "api_key": "",
-    "temperature": 0.3,
-    "top_p": 0.9,
-    "max_completion_tokens": 10000,
-    "timeout": 60
-  }
-}
-JSON
+elif [ -f "config/agent_llm_config.json.example" ]; then
+  # 以 .example 为 schema 单一来源（空值占位 → 视为未配置，AI 解读自动跳过）
+  cp config/agent_llm_config.json.example config/agent_llm_config.json
   chmod 600 config/agent_llm_config.json
-  ok "已生成 config/agent_llm_config.json（占位，api_key 留空）"
+  ok "已从 example 生成 config/agent_llm_config.json（占位，api_key 留空）"
   warn "未配置 api_key 时：规则引擎照常工作，AI 解读自动跳过"
+else
+  die "缺少 config/agent_llm_config.json.example 模板文件"
 fi
 
 if [ -f "config/storage.json" ]; then
@@ -129,10 +120,13 @@ fi
 # ── 步骤 6：跑测试 ─────────────────────────────────────────────────────────
 if [ "$RUN_TEST" -eq 1 ]; then
   say "步骤 6/6 运行测试"
-  if [ -f "tests/run_all.py" ]; then
-    "$VENV_PY" tests/run_all.py || die "测试未通过"
+  # 门禁统一为 pytest 全量收集。run_all.py 基于 vars(mod) 扫不到类方法用例（假绿灯根源），
+  # 仅在没有 pytest 时作后备，且其覆盖度较弱需显式告警。
+  if "$VENV_PY" -c "import pytest" >/dev/null 2>&1; then
+    "$VENV_PY" -m pytest tests/ -q --no-header -p no:cacheprovider || die "测试未通过"
   else
-    "$VENV_PY" -m pytest tests/ -q || die "测试未通过"
+    warn "未安装 pytest，退回后备运行器 tests/run_all.py（覆盖度较弱）"
+    "$VENV_PY" tests/run_all.py || die "测试未通过"
   fi
   ok "测试通过"
 else
