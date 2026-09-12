@@ -90,7 +90,9 @@ uv sync
 - `PUT /tasks/{id}/rename` 任务改名
 - `GET /tasks/{id}/messages` 任务历史
 - `DELETE /tasks/{id}` 归档任务（软删，历史保留）
-- 日志输出到 `logs/shangzhu.log`（路径由 `start.sh` 指定；同时保留控制台输出）
+- 日志（双写，两份都有用）：
+  - `logs/web_server.log` — **应用结构化日志**（`web_server.py` 内 `RotatingFileHandler`，单文件 10 MB × 保留 5 份）
+  - `logs/shangzhu.log` — `start.sh` 把 stdout/stderr 重定向到此，含**控制台副本**与 uvicorn 启动/报错输出
 
 > 注：`start.sh` 只启动 (A)。Coze 平台服务 (B) 依赖已从本仓移除，如需平台端服务应在 Coze 平台环境另行部署。
 
