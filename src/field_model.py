@@ -390,9 +390,38 @@ def _rule_cost_structure(params: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _rule_vcr_vs_gross_margin(params: Dict[str, Any]) -> Optional[str]:
+    """用户同时显式给出 variable_cost_ratio 与 gross_margin，且二者不满足恒等式。
+
+    恒等式：gross_margin = 1 − variable_cost_ratio。
+
+    旧行为（缺陷）：显式 vcr 优先，用户给的 gm 被**静默丢弃**——
+    「变动成本率40% + 毛利率50%」最终输出毛利率 60%，用户说的 50% 凭空消失且无任何提示。
+    这违背产品核心承诺「说清我们知道什么」，属于静默篡改用户输入。
+    本规则只负责**指出矛盾**，不改数（改数交给冲突处置 ops 让用户确认）。
+    """
+    vcr = params.get("variable_cost_ratio")
+    # 优先用**用户原始的**毛利率：derive() 之后 gross_margin 已被 1−vcr 覆盖，
+    # 直接读它只会得到「永远一致」的假象（这正是旧行为静默丢弃用户输入的成因）。
+    # `_user_gross_margin` 由 _fill_params 在覆盖前保留（无该键时退回当前值）。
+    gm = params.get("_user_gross_margin")
+    if gm is None:
+        gm = params.get("gross_margin")
+    if not all(isinstance(x, (int, float)) for x in (vcr, gm)):
+        return None
+    implied = 1.0 - float(vcr)
+    # 容差 2 个百分点：避免浮点噪声与四舍五入（如 vcr=0.4 → gm=0.6 精确相等时不得误报）
+    if abs(implied - float(gm)) > 0.02:
+        return (f"毛利率 {float(gm) * 100:.0f}% 与变动成本率 {float(vcr) * 100:.0f}% 矛盾"
+                f"（按变动成本率推算毛利率应为 {implied * 100:.0f}%）；"
+                f"当前按变动成本率口径计算，若应以毛利率为准请只保留其一")
+    return None
+
+
 CONSISTENCY_RULES: List[Callable[[Dict[str, Any]], Optional[str]]] = [
     _rule_revenue_vs_traffic_price,
     _rule_cost_structure,
+    _rule_vcr_vs_gross_margin,
 ]
 
 
@@ -432,6 +461,30 @@ def conflict_resolution_ops(params: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "propose": "set", "label": f"客流改为 {implied_traffic:.0f}/天（按月营收反推）",
                 "changes": {"daily_traffic": implied_traffic},
                 "reason": f"月营收{rev:,.0f} ÷ ({price:g}×30) = {implied_traffic:.0f}",
+                "hypothesis": None,
+            })
+
+    # vcr 与 gross_margin 矛盾：给出两个口径对齐方向（与上面同类，规则层自己给选项，不靠 LLM 猜）
+    vcr = params.get("variable_cost_ratio")
+    gm = params.get("_user_gross_margin")      # 同 _rule_vcr_vs_gross_margin：用用户原始值
+    if gm is None:
+        gm = params.get("gross_margin")
+    if all(isinstance(x, (int, float)) for x in (vcr, gm)):
+        implied_gm = 1.0 - float(vcr)      # 以变动成本率为准
+        implied_vcr = 1.0 - float(gm)      # 以毛利率为准
+        if abs(implied_gm - float(gm)) > 0.02:
+            ops.append({
+                "propose": "set",
+                "label": f"毛利率改为 {implied_gm * 100:.0f}%（按变动成本率推算）",
+                "changes": {"gross_margin": round(implied_gm, 4)},
+                "reason": f"1 − 变动成本率 {float(vcr) * 100:.0f}% = {implied_gm * 100:.0f}%",
+                "hypothesis": None,
+            })
+            ops.append({
+                "propose": "set",
+                "label": f"变动成本率改为 {implied_vcr * 100:.0f}%（按毛利率推算）",
+                "changes": {"variable_cost_ratio": round(implied_vcr, 4)},
+                "reason": f"1 − 毛利率 {float(gm) * 100:.0f}% = {implied_vcr * 100:.0f}%",
                 "hypothesis": None,
             })
     return ops

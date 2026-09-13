@@ -463,11 +463,22 @@ def _find_number(text: str, units, strict: bool = False,
     if not text:
         return None
 
-    # B2 修复：捕获数字前的负号（- 或 负 前缀），从 text 中剥离后统一用 _parse_number 保留符号
+    # 负号前缀：允许「- / － / − / 负」，且**紧贴数字**（中间可含空格）。
+    #
+    # D1 修复：旧实现只在 text **以负号开头**时才认符号，于是「月租金-8000」被短关键词
+    # 「月租」切成 after_text="金-8000" —— 开头是「金」不是「-」，符号就此丢失，
+    # 静默把 -8000 变成 8000。**这等于抽取器抢在 param_guard 之前替用户"修正"了数据**：
+    # guard 本来对 -8000 有正确的 critical 校验（低于物理下限 0、需确认、从 cleaned 剔除），
+    # 但永远收不到这个值，防线被短路。
+    # 改法：让每条数字正则自己捕获紧贴的负号，符号传播不再依赖子串开头位置。
+    # (?<!\d)：负号前不得紧跟数字，否则「每天卖100-150碗」的区间分隔符会被当成负号
+    #          → 抽成 -150 被 guard 判 critical 剔除，反而丢了正常客流（D1 修复的连带回归）。
+    _SIGN = r"(?<!\d)(?:-|－|−|负)\s*"
+
     negative = False
     if text.startswith("-") or text.startswith("负"):
         negative = True
-        text = text[1:].strip()  # 剥离负号前缀，后续正则只处理纯数字
+        text = text[1:].strip()
 
     # 0. 中文金额缩写「A万B / A千B」（E4 修复：「1万5」→15000，旧实现丢尾数得 10000）
     #    仅当请求的单位含 万/千 时启用；尾数后不得紧跟量词/时间词，
@@ -478,7 +489,7 @@ def _find_number(text: str, units, strict: bool = False,
             if u not in units_list:
                 continue
             m = re.search(
-                rf"(\d+(?:\.\d+)?\s*{u})(\d)"
+                rf"((?:{_SIGN})?\d+(?:\.\d+)?\s*{u})(\d)"
                 r"(?!\s*[人个位名杯碗份件瓶只条张袋盒串盘年月天日])",
                 text,
             )
@@ -492,13 +503,13 @@ def _find_number(text: str, units, strict: bool = False,
         units_list = units if isinstance(units, list) else [units]
         for u in units_list:
             # 数字 + 单位
-            m = re.search(rf"(\d+(?:\.\d+)?\s*{u})", text)
+            m = re.search(rf"((?:{_SIGN})?\d+(?:\.\d+)?\s*{u})", text)
             if m:
                 val = _parse_number(m.group(1))
                 if val is not None:
                     return -val if negative else val
             # 单位 + 数字
-            m = re.search(rf"({u}\s*\d+(?:\.\d+)?)", text)
+            m = re.search(rf"({u}\s*(?:{_SIGN})?\d+(?:\.\d+)?)", text)
             if m:
                 val = _parse_number(m.group(1))
                 if val is not None:
@@ -508,7 +519,7 @@ def _find_number(text: str, units, strict: bool = False,
             return None
 
     # 2. 普通数字 + 元/万/千（元可选：覆盖「固定成本2500」无单位阿拉伯数字）
-    m = re.search(r"(\d+(?:\.\d+)?\s*[万千]|\d+(?:\.\d+)?\s*元?)", text)
+    m = re.search(rf"((?:{_SIGN})?\d+(?:\.\d+)?(?:\s*[万千]|\s*元?))", text)
     if m:
         val = _parse_number(m.group(1))
         if val is not None:
@@ -520,17 +531,18 @@ def _find_number(text: str, units, strict: bool = False,
         return None
 
     # 3. 中文数字（含 万/千/百/亿，作为缩写兜底）
-    cn_match = re.search(r"([零一二两三四五六七八九十百千万亿]+)\s*(?:个|位|名)?", text)
+    cn_match = re.search(rf"((?:{_SIGN})?[零一二两三四五六七八九十百千万亿]+)\s*(?:个|位|名)?", text)
     if cn_match:
         num = _parse_number(cn_match.group(1))
         if num is not None:
             return -num if negative else num
 
     # 4. 纯数字
-    m = re.search(r"(\d+(?:\.\d+)?)", text)
+    m = re.search(rf"((?:{_SIGN})?\d+(?:\.\d+)?)", text)
     if m:
-        val = float(m.group(1))
-        return -val if negative else val
+        val = _parse_number(m.group(1))
+        if val is not None:
+            return -val if negative else val
 
     return None
 

@@ -259,6 +259,13 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
     user_gm = raw_params.get("gross_margin")
     user_unit_var = raw_params.get("unit_variable_cost")
 
+    # D2（本轮）：保留用户**原始**毛利率，供一致性规则比对。
+    # 原因：用户同时给 vcr 与 gm 时，derive() 会把 gm 覆盖成 1−vcr，
+    # 等 consistency_issues 运行时矛盾已被销毁、规则永远看不到 —— 用户的 50% 就此静默消失。
+    # 与 _revenue_series 同例：以 `_` 前缀标记的内部键，不参与业务计算。
+    if user_gm is not None:
+        p["_user_gross_margin"] = float(user_gm)
+
     if user_vc is not None:
         vc = float(user_vc)
         # 输入解析：兼容 40(%) 与 0.4(比例) 两种写法（单位归一，不是公式）

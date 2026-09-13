@@ -225,6 +225,103 @@ def test_cov_e2e_noodle_shop_daily_wording():
     assert cm["monthly_profit"] == 56800.0, cm
 
 
+def _guard_of(text):
+    """取抽取结果里的守门报告（无则空结构）。"""
+    return extract_params(text).get("_guard") or {}
+
+
+def test_cov_e6_negative_rent_keeps_sign_and_hits_guard():
+    """D1：`月租金-8000` 的负号**必须保留并交给 param_guard**，不得被抽取器静默改成 8000。
+
+    旧行为：短关键词「月租」先命中 → after_text="金-8000" → 开头不是负号 → 符号丢失，
+    静默把 -8000 变成 8000。这等于抽取器抢在 guard 之前替用户「修正」数据，
+    使 guard 本来正确的 critical 校验（低于物理下限 0）永远收不到该值。
+    """
+    g = _guard_of("月租金-8000")
+    crit = [i for i in g.get("issues", []) if i.get("level") == "critical"]
+    assert crit, f"负值未触发守门 critical：{g}"
+    assert crit[0]["field"] == "monthly_rent"
+    assert crit[0]["value"] == -8000.0, crit[0]      # 符号保留（若被吞则变成 8000）
+    assert "monthly_rent" not in _p("月租金-8000")   # 且不允许进入有效参数
+
+
+def test_cov_e6_negative_word_rent_same():
+    """D1：中文「负」前缀同样生效（月租金负8000）。"""
+    g = _guard_of("月租金负8000")
+    crit = [i for i in g.get("issues", []) if i.get("level") == "critical"]
+    assert crit and crit[0]["value"] == -8000.0, g
+
+
+def test_cov_e6_negative_profit_is_allowed():
+    """利润可以为负（亏损），不应被 guard 判 critical —— 保留 -5000。"""
+    assert _p("月利润-5000").get("monthly_profit") == -5000.0
+    crit = [i for i in _guard_of("月利润-5000").get("issues", []) if i.get("level") == "critical"]
+    assert not crit, f"亏损不该被判 critical：{crit}"
+
+
+def test_cov_e6_range_dash_not_treated_as_sign():
+    """区间分隔符不得被当负号：「每天卖100-150碗」应得正数客流，而非 -150。
+
+    这是 D1 修复的连带回归：若负号不加「前面不得是数字」的约束，
+    "100-150" 会被抽成 -150，再被 guard 判 critical 剔除 → 连正常客流都丢了。
+    """
+    v = _p("每天卖100-150碗").get("daily_traffic")
+    assert v is not None and v > 0, f"区间被误判为负值或漏抽：{v}"
+
+
+def test_cov_e6_positive_numbers_unaffected():
+    """防回归：正数与金额缩写不得因负号改动而失效。"""
+    assert _p("月租金8000")["monthly_rent"] == 8000.0
+    assert _p("月租1万5")["monthly_rent"] == 15000.0
+    assert _p("投资20万")["total_investment"] == 200000.0
+    assert _p("月租2万5人")["monthly_rent"] == 20000.0
+
+
+def _filled(raw):
+    """走 _fill_params（含 derive 覆盖），返回用于一致性检查的 params。"""
+    from tools.workflow_engine import _fill_params
+    p, _src, _mixed = _fill_params(raw)
+    return p
+
+
+def test_cov_e7_vcr_gm_conflict_is_surfaced():
+    """D2：vcr 与 gm 同时给出且矛盾时，**必须显式提示**，不得静默丢弃用户的毛利率。
+
+    旧缺陷：_fill_params 把 gm 覆盖成 1−vcr，等到 consistency_issues 运行时矛盾已销毁
+    → 用户说「毛利率 50%」，输出却变成 60%，全程无提示（静默篡改用户输入）。
+    """
+    from field_model import consistency_issues
+    p = _filled({"monthly_rent": 8000, "daily_traffic": 150,
+                 "price_per_unit": 18, "variable_cost_ratio": 0.4,
+                 "gross_margin": 0.5})
+    issues = consistency_issues(p)
+    assert issues, "矛盾未被检出（用户毛利率会被静默丢弃）"
+    assert "矛盾" in issues[0]["message"], issues[0]
+    assert "50%" in issues[0]["message"] and "60%" in issues[0]["message"], issues[0]
+
+
+def test_cov_e7_no_false_positive_when_consistent():
+    """口径自洽（vcr=0.4 → gm=0.6）不得误报矛盾。"""
+    from field_model import consistency_issues
+    for raw in ({"monthly_rent": 8000, "variable_cost_ratio": 0.4, "gross_margin": 0.6},
+                {"monthly_rent": 8000, "variable_cost_ratio": 0.4},
+                {"monthly_rent": 8000, "gross_margin": 0.5}):
+        assert consistency_issues(_filled(raw)) == [], raw
+
+
+def test_cov_e7_conflict_offers_two_alignments():
+    """矛盾应给出两个口径对齐方向（以 vcr 为准 / 以 gm 为准），由用户确认而非系统独断。"""
+    from field_model import conflict_resolution_ops
+    p = _filled({"monthly_rent": 8000, "daily_traffic": 150,
+                 "price_per_unit": 18, "variable_cost_ratio": 0.4,
+                 "gross_margin": 0.5})
+    ops = conflict_resolution_ops(p)
+    labels = [o["label"] for o in ops]
+    assert len(ops) == 2, labels
+    assert any("毛利率改为 60%" in l for l in labels), labels
+    assert any("变动成本率改为 50%" in l for l in labels), labels
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
