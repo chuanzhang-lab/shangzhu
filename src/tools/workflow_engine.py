@@ -266,6 +266,12 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
     if user_gm is not None:
         p["_user_gross_margin"] = float(user_gm)
 
+    # D8：用户口中的客流单位（「每天卖100碗」→「碗」）。行业模板只到「餐饮」
+    # 粒度（默认「杯」），面馆会看到「保本客流 22 杯/天」。用户口径优先。
+    # 同 `_` 前缀内部键，不参与业务计算，只供呈现层取用。
+    if raw_params.get("_traffic_unit"):
+        p["_traffic_unit"] = raw_params["_traffic_unit"]
+
     if user_vc is not None:
         vc = float(user_vc)
         # 输入解析：兼容 40(%) 与 0.4(比例) 两种写法（单位归一，不是公式）
@@ -1362,6 +1368,9 @@ def quick_scan(params_json: str) -> str:
                     round(params["funding_amount"], 0)
                     if params.get("funding_amount") is not None else None
                 ),
+                # D8：用户口中的客流单位（碗/杯/份）透传给呈现层。
+                # `_` 前缀内部键，不参与业务计算，只用于单位显示。
+                "_traffic_unit": params.get("_traffic_unit"),
             },
             "param_sources": {k: v for k, v in param_sources.items()},
             "confidence": _derive_conf(param_sources),

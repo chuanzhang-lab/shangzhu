@@ -8,12 +8,19 @@ import re
 from typing import Any, Dict, List, Optional
 
 
-def _traffic_unit(benchmark: Optional[Dict] = None) -> str:
-    """客流单位：从行业 benchmark 的 daily_traffic_range 里取（「80-250 杯」→「杯/天」）。
+def _traffic_unit(benchmark: Optional[Dict] = None, params: Optional[Dict] = None) -> str:
+    """客流单位：用户口中的量词 > 行业 benchmark 默认 > 中性兜底。
 
-    旧实现把「杯/天」写死在模板里 —— 面馆会看到「盈亏平衡客流 46 杯/天」，
-    单位张冠李戴。此处按行业取值，取不到则退中性单位。
+    行业默认：从 benchmark 的 daily_traffic_range 取（「80-250 杯」→「杯/天」）。
+    旧实现把「杯/天」写死在模板里 —— 面馆会看到「盈亏平衡客流 46 杯/天」。
+
+    D8：行业模板只到「餐饮」粒度（默认「杯」），但用户说的是「每天卖 100 碗」。
+    用户自己给的量词是最权威的口径，优先于行业默认；取不到才回退行业值。
+    参数 `_traffic_unit` 由抽取器写入（`_` 前缀内部键，不参与业务计算）。
     """
+    user_unit = (params or {}).get("_traffic_unit")
+    if user_unit:
+        return f"{user_unit}/天"
     rng = (benchmark or {}).get("daily_traffic_range") or ""
     m = re.search(r"\d+\s*[-~－—]\s*\d+\s*([\u4e00-\u9fa5]{1,2})\s*$", rng)
     return f"{m.group(1)}/天" if m else "单/天"
@@ -163,7 +170,8 @@ def _fmt_scan(data: Dict) -> str:
 
     daily_breakeven = core.get("daily_breakeven")
     if daily_breakeven:
-        lines.append(f"| 盈亏平衡客流 | {daily_breakeven:.0f} {_traffic_unit(data.get('benchmark'))} | — |")
+        lines.append(f"| 盈亏平衡客流 | {daily_breakeven:.0f} "
+                     f"{_traffic_unit(data.get('benchmark'), data.get('params'))} | — |")
 
     gross_margin = core.get("gross_margin_percent")
     if gross_margin:

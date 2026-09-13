@@ -322,6 +322,216 @@ def test_cov_e7_conflict_offers_two_alignments():
     assert any("变动成本率改为 50%" in l for l in labels), labels
 
 
+# ── E8：客单价的真实说法（D3：最高频措辞整段丢失）─────────────────────────
+#
+# 根因：`_extract_unit_price_alias` 只认「量词紧邻数字」（每碗18元），
+# 而真实口语里量词和数字之间隔着商品名/动词，或数字在前量词在后：
+#   「一碗牛肉面卖18元」「一碗卖18元」「牛肉面卖18元一碗」
+# 实测这三种全部返回 {} —— 用户明明报了价，系统记不住，还回头追问「客单价」。
+
+def test_cov_e8_price_with_product_name_and_verb():
+    """「一碗牛肉面卖18元」——量词与数字之间夹商品名 + 动词「卖」。"""
+    for text, exp in {
+        "一碗牛肉面卖18元": 18,
+        "一碗卖18元": 18,
+        "一份黄焖鸡卖23元": 23,
+        "一杯奶茶卖15元": 15,
+    }.items():
+        got = _p(text).get("price_per_unit")
+        assert got == exp, f"{text} → price_per_unit={got}（期望 {exp}）"
+
+
+def test_cov_e8_price_with_product_name_no_verb():
+    """「一碗牛肉面18元」——无动词，仅商品名。"""
+    for text, exp in {
+        "一碗牛肉面18元": 18,
+        "一杯拿铁28元": 28,
+    }.items():
+        got = _p(text).get("price_per_unit")
+        assert got == exp, f"{text} → price_per_unit={got}（期望 {exp}）"
+
+
+def test_cov_e8_price_quantifier_after_number():
+    """「牛肉面卖18元一碗」——量词后置（数字+元+量词）。"""
+    for text, exp in {
+        "牛肉面卖18元一碗": 18,
+        "卖18元一碗": 18,
+        "定价18元一杯": 18,
+    }.items():
+        got = _p(text).get("price_per_unit")
+        assert got == exp, f"{text} → price_per_unit={got}（期望 {exp}）"
+
+
+def test_cov_e8_negative_cost_sentence_still_not_price():
+    """护栏：含「成本」的金额不得被当售价（E3 护栏在新形态下仍生效）。"""
+    for text in ("一碗牛肉面成本6元", "每碗成本6元", "食材成本每份8元"):
+        assert _p(text).get("price_per_unit") is None, f"{text} 被误判为售价: {_p(text)}"
+
+
+def test_cov_e8_negative_daily_traffic_not_price():
+    """护栏：「每天卖100碗」无元/块 → 仍是客流，不是客单价。"""
+    p = _p("每天卖100碗")
+    assert p.get("daily_traffic") == 100, p
+    assert p.get("price_per_unit") is None, p
+
+
+def test_cov_e8_negative_time_period_after_money_is_not_price():
+    """护栏（D3 回归）：「月租金8000元一个月」的「一个月」是时间单位，不是销售单位。"""
+    for text in ("月租金8000元一个月", "房租每月8000元", "每月工资6000元一个月"):
+        p = _p(text)
+        assert p.get("price_per_unit") is None, f"{text} 被误判为客单价: {p}"
+
+
+def test_cov_e8_negative_salary_per_person_is_not_price():
+    """护栏：人均月薪（元/人）不得被形态 B 当成客单价。"""
+    p = _p("每个员工6000元")
+    assert p.get("price_per_unit") is None, p
+
+
+def test_cov_e8_end_to_end_noodle_shop_reaches_full_params():
+    """端到端：补齐后，牛肉面店多轮措辞应能凑齐客流+客单价+变动成本。"""
+    p = _p("一碗牛肉面卖18元，一碗成本6元，每天卖100碗")
+    assert p.get("price_per_unit") == 18, p
+    assert p.get("daily_traffic") == 100, p
+    assert p.get("unit_variable_cost") == 6, p
+
+
+# ── E9：率字段的量纲护栏（D4：把「6元」当成变动成本率 6%）────────────────
+#
+# 根因：variable_cost_rate 是**率**字段，units 为 %，但兜底路径允许无单位纯数字。
+# 「一碗的变动成本6元」→ rate=6.0 → 引擎按「>1 则 /100」归一 → variable_cost_ratio=0.06。
+# 于是用户说的「一碗成本 6 元」被变成「变动成本率 6%」，毛利率凭空变成 94%。
+# 元/块/万/千 是金额单位，量纲不符，率字段必须拒收。
+
+def test_cov_e9_money_amount_is_not_a_rate():
+    """「变动成本6元」→ 不得产出 variable_cost_rate（那是金额，不是率）。"""
+    for text in ("一碗的变动成本6元", "变动成本6元", "可变成本8块"):
+        p = _p(text)
+        assert p.get("variable_cost_rate") is None, f"{text} 误把金额当率: {p}"
+        assert p.get("variable_cost_ratio") is None, f"{text} 误把金额当率: {p}"
+
+
+def test_cov_e9_unit_cost_still_extracted():
+    """量纲护栏不得连正确的 unit_variable_cost 一起丢掉。"""
+    assert _p("一碗的变动成本6元").get("unit_variable_cost") == 6
+    assert _p("每碗成本6元").get("unit_variable_cost") == 6
+
+
+def test_cov_e9_percent_rate_still_works():
+    """护栏不得误伤正常百分比写法。"""
+    for text, exp in {
+        "变动成本率55%": 0.55,
+        "变动成本占营收60%": 0.6,
+    }.items():
+        p = _p(text)
+        got = p.get("variable_cost_ratio", p.get("variable_cost_rate"))
+        assert abs(got - exp) < 1e-6, f"{text} → {got}（期望 {exp}）"
+
+
+def test_cov_e9_bare_decimal_rate_still_works():
+    """「变动成本率0.6」无百分号也应识别为 0.6（不得因护栏被拒）。"""
+    p = _p("变动成本率0.6")
+    got = p.get("variable_cost_ratio", p.get("variable_cost_rate"))
+    assert abs(got - 0.6) < 1e-6, p
+
+
+def test_cov_e9_gross_margin_money_not_rate():
+    """毛利率同理：「毛利6元」不得变成 600% 的毛利率。"""
+    assert _p("毛利6元").get("gross_margin") is None
+
+
+def test_cov_e9_end_to_end_unit_cost_divided_by_price():
+    """端到端：18 元售价 / 6 元单碗成本 → 变动成本率 33%，不是 6%。"""
+    p = _p("一碗牛肉面卖18元，一碗成本6元")
+    filled = _filled({
+        "monthly_rent": 8000,
+        "price_per_unit": p["price_per_unit"],
+        "unit_variable_cost": p["unit_variable_cost"],
+    })
+    vcr = filled.get("variable_cost_ratio")
+    assert abs(vcr - 6 / 18) < 1e-6, f"vcr={vcr}（期望 {6/18:.4f}）"
+
+
+# ── E10：行业识别（D6 漏识别 / D7 臆断）───────────────────────────────────
+#
+# D6：中式快餐最主流的店名形态全部漏识别——词表里只有「面馆」，
+# 而真实说法是「牛肉面店/拉面店/米粉店/饺子馆/包子铺/粥店」。
+# 后果：行业落「其他」→ 拿不到餐饮模板的客流单位与默认值，
+# 用户的核心场景（牛肉面店）反而享受不到行业模板。
+#
+# D7（反向）：成本项词汇被当成行业关键词——「包装费3000元」→ 制造。
+# 用户只是报了一笔包装费，系统就给他定性成制造业。漏识别只是降级，
+# 臆断是**凭空造参数**，性质更严重。
+
+def test_cov_e10_cn_fastfood_shop_names_are_catering():
+    """中式快餐主流店名必须识别为餐饮（D6）。"""
+    for text in ("我想开一家牛肉面店", "开个牛肉面店", "兰州拉面店", "拉面店",
+                 "米粉店", "米线店", "馄饨店", "饺子馆", "包子铺", "粥店",
+                 "麻辣烫店", "黄焖鸡店", "螺蛳粉店"):
+        got = extract_params(text).get("industry")
+        assert got == "餐饮", f"{text} → industry={got}（期望 餐饮）"
+
+
+def test_cov_e10_catering_regression_still_works():
+    """既有餐饮词不得因改动而失效。"""
+    for text in ("咖啡店", "奶茶店", "火锅店", "面馆", "牛肉面馆", "羊肉汤店"):
+        got = extract_params(text).get("industry")
+        assert got == "餐饮", f"{text} → industry={got}"
+
+
+def test_cov_e10_cost_items_do_not_decide_industry():
+    """D7：报一笔成本费不得把用户定性成某个行业。"""
+    for text in ("包装费3000元", "每月包装2000元", "加工费5000元"):
+        got = extract_params(text).get("industry")
+        assert got is None, f"{text} 被臆断为 industry={got}"
+
+
+def test_cov_e10_real_manufacturing_still_detected():
+    """护栏：真正的制造业说法仍要识别（不得因收紧关键词而漏）。"""
+    for text in ("我想开个五金加工厂", "做OEM代工的工厂", "开一家印刷厂"):
+        got = extract_params(text).get("industry")
+        assert got == "制造", f"{text} → industry={got}（期望 制造）"
+
+
+# ── E11：客流单位用用户口径（D8「碗」被显示成「杯」）──────────────────────
+#
+# 行业模板只到「餐饮」粒度，餐饮默认「杯」。用户说「每天卖100碗」，
+# 仪表盘却回「盈亏平衡客流 22 杯/天」—— 用户说的是碗、系统回的是杯。
+# 用户自己口中的量词是最权威口径，优先于行业默认。
+
+def test_cov_e11_user_quantifier_is_recorded():
+    """抽取器记录用户口中的量词（内部键 `_traffic_unit`，不参与计算）。"""
+    for text, exp in {
+        "每天大概能卖100碗": "碗",
+        "每天卖100杯": "杯",
+        "每天100份": "份",
+        "每天卖100-150碗": "碗",   # 区间写法也要取到
+    }.items():
+        got = extract_params(text).get("_traffic_unit")
+        assert got == exp, f"{text} → _traffic_unit={got}（期望 {exp}）"
+
+
+def test_cov_e11_unit_not_recorded_without_traffic():
+    """没抽到客流时不记录单位（避免无客流却凭空造单位）。"""
+    assert extract_params("一碗牛肉面卖18元").get("_traffic_unit") is None
+
+
+def test_cov_e11_dashboard_uses_user_unit():
+    """端到端：有用户量词时仪表盘用它，而非行业默认的「杯」。"""
+    from router.formatter import format_response
+    from tools.workflow_engine import quick_scan
+    base = {"industry": "餐饮", "monthly_rent": 8000, "daily_traffic": 100,
+            "price_per_unit": 18, "unit_variable_cost": 6}
+    for unit, exp in (("碗", "22 碗/天"), (None, "22 杯/天")):
+        payload = dict(base)
+        if unit:
+            payload["_traffic_unit"] = unit
+        d = json.loads(quick_scan.invoke(
+            {"params_json": json.dumps(payload, ensure_ascii=False)}))
+        md = format_response("quick_scan", d)
+        assert exp in md, f"unit={unit} 未渲染出「{exp}」：{[l for l in md.splitlines() if '盈亏平衡' in l]}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

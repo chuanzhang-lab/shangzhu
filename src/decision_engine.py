@@ -411,7 +411,9 @@ def decide(
             parts.append(f"在当前数据下月利润 {profit:,.0f} 元")
         if dbe is not None and isinstance(traffic, (int, float)):
             gap = dbe - traffic
-            state = "高于盈亏平衡客流" if gap <= 0 else f"离盈亏平衡客流还差 {gap:.0f} 杯/天"
+            # D8：用用户口中的量词（碗/杯/份），不要写死「杯/天」。
+            _tu = current_params.get("_traffic_unit") or "杯"
+            state = "高于盈亏平衡客流" if gap <= 0 else f"离盈亏平衡客流还差 {gap:.0f} {_tu}/天"
             parts.append(state)
         if rw is not None and isinstance(rw, (int, float)):
             parts.append(f"现金跑道 {rw:.1f} 个月")

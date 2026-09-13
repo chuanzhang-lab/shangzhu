@@ -32,10 +32,22 @@ INDUSTRY_KEYWORDS = {
         "饮品", "甜品", "早餐", "中餐", "西餐", "日料", "炸鸡", "披萨",
         # P3-1：补餐饮细分，避免「羊肉汤店」漏识别为 None
         "羊肉汤", "羊汤", "牛肉汤", "汤店", "汤馆", "煲汤", "汤",
+        # D6：中式快餐主流店名。旧词表只有「面馆」，而真实说法是
+        # 「牛肉面店/拉面店/米粉店/饺子馆/包子铺」——本项目的核心场景
+        # （牛肉面店）反而落「其他」，拿不到餐饮模板的客流单位与默认值。
+        # 只收**复合品类词**（拉面/牛肉面/米粉…），不收单字「面」：
+        # 「面」在「方面/面积/面对」里大量出现，单收会误判。
+        "牛肉面", "拉面", "板面", "刀削面", "烩面", "米线", "米粉",
+        "螺蛳粉", "酸辣粉", "馄饨", "饺子", "包子", "粥铺", "粥店",
+        "麻辣烫", "冒菜", "串串", "黄焖鸡", "盖饭", "盖浇饭", "炒饭",
+        "便当", "卤味", "熟食", "煎饼", "豆浆", "油条", "大排档", "排档",
+        "面店", "粉店", "面食", "面点", "砂锅", "煲仔饭", "烤肉", "自助餐",
     ],
     "零售": [
         "零售", "便利店", "超市", "小卖部", "杂货", "服装店", "鞋店",
         "母婴", "化妆品", "美妆", "饰品", "书店", "文具", "花店",
+        # D7：删除裸「包装」——「包装费3000元」只是报了一笔成本，
+        # 却被定性成零售/制造。成本项词汇不做行业判据。
     ],
     "SaaS": [
         "saas", "软件", "工具", "云服务", "api", "paas",
@@ -50,8 +62,13 @@ INDUSTRY_KEYWORDS = {
         "直播带货", "跨境电商", "亚马逊", "独立站",
     ],
     "制造": [
-        "制造", "工厂", "加工", "生产", "代工", "OEM", "ODM", "印刷",
-        "包装", "纺织", "五金",
+        # D7：删除裸「加工」「生产」「包装」三个通用动词/成本词。
+        # 它们既是成本字段（packaging），也是日常动词（这个方案的包装很重要），
+        # 会把「包装费3000元」「加工费5000元」臆断成制造业。
+        # 改为**带实体的复合词**，只匹配真正的制造场景。
+        "制造", "工厂", "加工厂", "代工", "OEM", "ODM", "印刷",
+        "纺织", "五金", "机械加工", "生产制造", "生产线", "组装厂",
+        "模具", "注塑", "车间",
     ],
     "医疗": [
         "医疗", "诊所", "医院", "牙科", "口腔", "中医", "康复", "体检",
@@ -311,6 +328,8 @@ _FIELD_PATTERNS = [
             "毛利润": "before",
             "毛利": "before",
         },
+        # D4：同理，「毛利6元」是金额，不能变成 6% 的毛利率。
+        "reject_units": ["元", "块", "万", "千"],
     },
     {
         "field": "monthly_expense",
@@ -331,6 +350,8 @@ _FIELD_PATTERNS = [
             "变动成本": "before",
             "可变成本": "before",
         },
+        # D4：「变动成本6元」是单位金额，不是率。元/块/万/千 一律拒收。
+        "reject_units": ["元", "块", "万", "千"],
     },
     # ── P4-1 单位变动成本：与客单价(裸「每份」)区分，必须用带「成本」的精确词 ──
     {
@@ -398,6 +419,10 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
     units = field_def.get("units")
     strict = field_def.get("strict_units", False)
     kw_position = field_def.get("kw_position", {})
+    # D4：率字段的量纲护栏。units 是「期望单位」（%），reject_units 是「量纲不符单位」。
+    # 「变动成本6元」的 6 带元 → 是**金额**不是率，必须拒收，否则会被当成 6%
+    # （引擎按「>1 则 /100」归一），毛利率凭空变 94%。
+    reject_units = field_def.get("reject_units")
 
     for kw in keywords:
         idx = segment.find(kw)
@@ -433,11 +458,26 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
 
         # 阶段2：兜底（无单位/中文/纯数字），沿用原逻辑
         for s in sides:
+            # D4：量纲不符 → 该数字带金额单位，不是本率字段的值，跳过而非误收。
+            if reject_units and _has_number_with_unit(s, reject_units):
+                continue
             value = _find_number(s, units, strict=strict)
             if value is not None:
                 return value
 
     return None
+
+
+def _has_number_with_unit(text: str, units) -> bool:
+    """text 中是否存在「数字 + 指定单位」的写法（D4 率字段量纲护栏用）。
+
+    与 `_find_number` 的取值不同：这里只判**量纲是否出现**，不取值，
+    因为「变动成本6元」要的是「认出它是元、从而拒收」，而不是把 6 读出来。
+    """
+    if not text:
+        return False
+    return re.search(r"\d+(?:\.\d+)?\s*(?:" + "|".join(units) + r")",
+                     text) is not None
 
 
 def _find_number(text: str, units, strict: bool = False,
@@ -646,7 +686,14 @@ def _extract_cost_ratio(text: str, params: dict) -> None:
         if m:
             val = float(m.group(1))
             if 0 < abs(val) < 100:           # 百分数（0<|v|<100），归一化；极小/极大视为噪声
-                params["variable_cost_ratio"] = val / 100  # 保留符号
+                # D5 修复：未写 % 且 |v|<=1 的裸小数**本身已是比例**，不再 /100。
+                # 旧实现一律 /100，「变动成本率0.6」被算成 0.006（0.6%），
+                # 与通用字段归一出的 60% 自相矛盾——同一句话两个答案，
+                # 引擎取 variable_cost_ratio → 毛利率凭空变 99.4%。
+                has_pct = "%" in (m.group(0) or "")
+                params["variable_cost_ratio"] = (
+                    val if (not has_pct and abs(val) <= 1) else val / 100
+                )  # 保留符号
             return
 
 
@@ -719,8 +766,12 @@ def _extract_unit_cost_alias(text: str, params: dict) -> None:
     if params.get("unit_variable_cost") is not None:
         return
     m = re.search(
-        r"(?:食材|原料|材料|变动|可变|单位|单份|单件|每碗|每杯|每份|每件|每瓶|每个|单个)"
-        r"\s*成本\s*(?:为|是|要|约|大约|大概)?\s*"
+        r"(?:食材|原料|材料|变动|可变|单位|单份|单件|每碗|每杯|每份|每件|每瓶|每个|单个"
+        # D3：口语里「一碗成本6元」比「每碗成本6元」常见，量词前缀补上「一X」；
+        # 允许量词与「成本」之间夹 ≤8 字商品名（一碗牛肉面成本6元），
+        # 但中间段不含分隔符，因此不会跨句误抓。
+        r"|一碗|一杯|一份|一件|一瓶|一个)"
+        r"[^\s，。；、]{0,8}?成本\s*(?:为|是|要|约|大约|大概)?\s*"
         r"(?:每碗|每杯|每份|每件|每瓶|每个|单份|单件)?\s*"
         r"(\d+(?:\.\d+)?)\s*[元块]",
         text,
@@ -729,6 +780,32 @@ def _extract_unit_cost_alias(text: str, params: dict) -> None:
         val = _parse_number(m.group(1))
         if val and val > 0:
             params["unit_variable_cost"] = val
+
+
+def _extract_traffic_unit(text: str, params: dict) -> None:
+    """客流单位（D8）：「每天卖100碗」→「碗」。
+
+    行业模板只到「餐饮」粒度，而餐饮模板默认「杯」——面馆于是看到
+    「盈亏平衡客流 22 杯/天」，用户说的是碗、系统回的是杯，单位张冠李戴。
+    用户自己口中的量词是最权威的口径，优先于行业默认值。
+
+    以 `_` 前缀存内部键（同 `_revenue_series` / `_user_gross_margin` 惯例），
+    不参与业务计算，只供呈现层取用。
+    """
+    if params.get("daily_traffic") is None:
+        return
+    # 区间写法（「每天卖100-150碗」）也要取到量词：数字后可跟一段可选区间尾巴。
+    _n = r"\d+(?:\.\d+)?(?:\s*[-~－—]\s*\d+(?:\.\d+)?)?"
+    for pat in (
+        rf"(?:每天|每日|日均|一天|一天大概|每天大概|每天能)\s*"
+        rf"(?:卖|售|销|能卖|大概|约|大约|平均)?\s*"
+        rf"{_n}\s*({_QUANTIFIERS})",
+        rf"{_n}\s*({_QUANTIFIERS})\s*(?:/|每)\s*天",
+    ):
+        m = re.search(pat, text)
+        if m:
+            params["_traffic_unit"] = m.group(1)
+            return
 
 
 def _extract_unit_price_alias(text: str, params: dict) -> None:
@@ -742,14 +819,39 @@ def _extract_unit_price_alias(text: str, params: dict) -> None:
     """
     if params.get("price_per_unit") is not None:
         return
-    for m in re.finditer(
-            rf"(?:每|一)\s*(?:{_QUANTIFIERS})\s*(\d+(?:\.\d+)?)\s*[元块]", text):
-        if "成本" in text[max(0, m.start() - 4):m.start()]:
-            continue
-        val = _parse_number(m.group(1))
-        if val and val > 0:
-            params["price_per_unit"] = val
-            return
+    # D3 修复：旧正则只认「量词紧邻数字」（每碗18元），而口语里量词与数字之间
+    # 几乎总夹着商品名和动词（一碗牛肉面卖18元 / 一碗卖18元），或量词后置
+    # （牛肉面卖18元一碗）。实测这三种最高频说法全部漏抽 → 用户报了价，
+    # 系统记不住，还回头追问「客单价」，属于静默丢弃用户输入。
+    #
+    # 中间段 `_gap` 的三重约束（缺一不可，否则会误抓）：
+    #   ① 不含分隔符（，。；、空格）→ 不跨句、不跨并列成分；
+    #   ② 不含 人/员/月/薪 等角色与时间字 →「每个员工6000元」不会被当客单价；
+    #   ③ 上限 8 字 → 不吞掉整句。
+    _gap = r"[^\s，。；、人员月薪年薪周资]{0,8}?"
+    _money = r"(\d+(?:\.\d+)?)\s*[元块]"
+    _pats = [
+        # 形态 A：量词(每|一) + [商品名/动词] + 金额 —— 一碗牛肉面卖18元 / 一杯拿铁28元
+        rf"(?:每|一)\s*(?:{_QUANTIFIERS})\s*{_gap}\s*{_money}",
+        # 形态 B：金额 + (一|每) + 量词 —— 牛肉面卖18元一碗 / 定价18元一杯
+        # 尾部负向断言（D3 回归护栏）：量词后若接 月/天/年/周/时/人/员，
+        # 那是**时间单位或人数**，不是销售单位——
+        # 「月租金8000元一个月」的「一个月」不能当成客单价 8000。
+        rf"{_money}(?:钱)?\s*(?:一|每)\s*(?:{_QUANTIFIERS})(?!\s*[月天日年周时人员])",
+    ]
+    for _pat in _pats:
+        for m in re.finditer(_pat, text):
+            if "成本" in text[max(0, m.start() - 4):m.start()]:
+                continue
+            # 护栏2（D3 新增）：形态 A 允许量词与数字间夹任意字符，
+            # E3 原有的「前置 4 字」护栏会被绕过（一碗牛肉面成本6元 里
+            # 「成本」在量词之后），故补查命中串自身。
+            if "成本" in m.group(0):
+                continue
+            val = _parse_number(m.group(1))
+            if val and val > 0:
+                params["price_per_unit"] = val
+                return
 
 
 # 常见的「角色+薪资」措辞，用于从「厨师6000、服务员4500」取人均薪资
@@ -821,6 +923,9 @@ def extract_params(text: str) -> Dict:
     #    但 E5 认成本、E3 靠「成本」前置词护栏跳过，互不抢词。
     _extract_unit_cost_alias(text, params)
     _extract_unit_price_alias(text, params)
+
+    # ── 补充抽取：客流单位（D8「每天卖100碗」→「碗」）──
+    _extract_traffic_unit(text, params)
 
     # ── 补充后去噪：通用字段 variable_cost_rate 可能误抓相邻客流数字
     #    （如「日售50杯变动成本率55%」→ 50），而精确的 variable_cost_ratio
