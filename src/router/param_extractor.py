@@ -270,6 +270,8 @@ _FIELD_PATTERNS = [
             "日均卖", "日均售", "日售", "日卖", "日销",
             "每天客流", "每天订单", "每天销量",
             "每天卖", "每天出", "每天做", "每天接",
+            # D9：「一天卖80杯」与「每天卖」同构，旧表只有「每天X」没有「一天X」
+            "一天卖", "一天出", "一天做", "一天接", "一天大概", "一天能",
             "客流", "订单量", "销量",
             "杯/天", "单/天", "人/天", "件/天",
             "杯每天", "单每天", "人每天", "件每天",
@@ -277,6 +279,9 @@ _FIELD_PATTERNS = [
         ],
         "position": "before",
         "units": ["杯", "单", "人", "件", "碗", "份", "条", "桌"],
+        # D9：复用 D4 的量纲护栏。「每天营业额3000」里的 3000 是**钱**不是客流，
+        # 通用兜底路径会把它抽成 daily_traffic=3000（撑出假营收）。
+        "reject_units": ["元", "块", "万", "千"],
         "kw_position": {
             # 倒装: 数字在关键词前
             "杯/天": "after",
@@ -700,6 +705,9 @@ def _extract_cost_ratio(text: str, params: dict) -> None:
 # ── E2：中文分数「X成」────────────────────────────────────────────────────
 # 计量单位的量词（供 E3/E5 的独立正则使用，不进 _FIELD_PATTERNS 的 keyword 列表）
 _QUANTIFIERS = "碗|杯|份|位|件|瓶|个|只|条|张|袋|盒|串|盘"
+# 客流单位（D9）：比售价量词多几个只用于计数的单位（桌/单/台/人次）。
+# 不并入 _QUANTIFIERS —— 「一桌」进售价量词会让「一桌菜300元」被当客单价。
+_TRAFFIC_UNITS = _QUANTIFIERS + "|桌|单|台|人次"
 
 _CN_FRACTION_DIGIT = {
     "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
@@ -783,29 +791,38 @@ def _extract_unit_cost_alias(text: str, params: dict) -> None:
 
 
 def _extract_traffic_unit(text: str, params: dict) -> None:
-    """客流单位（D8）：「每天卖100碗」→「碗」。
+    """客流与客流单位（D8/D9）：「每天卖100碗」→ 100 碗。
 
-    行业模板只到「餐饮」粒度，而餐饮模板默认「杯」——面馆于是看到
-    「盈亏平衡客流 22 杯/天」，用户说的是碗、系统回的是杯，单位张冠李戴。
-    用户自己口中的量词是最权威的口径，优先于行业默认值。
+    D8 单位：行业模板只到「餐饮」粒度，而餐饮模板默认「杯」——面馆于是看到
+    「盈亏平衡客流 22 杯/天」，用户说的是碗、系统回的是杯。用户口中的量词
+    是最权威的口径，优先于行业默认。
 
-    以 `_` 前缀存内部键（同 `_revenue_series` / `_user_gross_margin` 惯例），
+    D9 补漏：「日均80桌」「一天卖80杯」旧表抽不到——
+    `daily_traffic` 的 keyword 有「每天卖」却没有「一天卖」，
+    「日均」也只认「日均客流/日均订单…」而不认裸「日均 + 数字 + 量词」。
+    （之所以不把裸「日均」加进 keyword：那会让「日均营业额3000」被当成客流 3000。
+      这里用「数字后必须紧跟量词」的结构约束规避。）
+
+    以 `_` 前缀存单位（同 `_revenue_series` / `_user_gross_margin` 惯例），
     不参与业务计算，只供呈现层取用。
     """
-    if params.get("daily_traffic") is None:
-        return
-    # 区间写法（「每天卖100-150碗」）也要取到量词：数字后可跟一段可选区间尾巴。
-    _n = r"\d+(?:\.\d+)?(?:\s*[-~－—]\s*\d+(?:\.\d+)?)?"
+    _num = r"(\d+(?:\.\d+)?)"          # 区间取后段（「100-150碗」按 150 计）
+    _tail = r"(?:\s*[-~－—]\s*\d+(?:\.\d+)?)?"
     for pat in (
-        rf"(?:每天|每日|日均|一天|一天大概|每天大概|每天能)\s*"
-        rf"(?:卖|售|销|能卖|大概|约|大约|平均)?\s*"
-        rf"{_n}\s*({_QUANTIFIERS})",
-        rf"{_n}\s*({_QUANTIFIERS})\s*(?:/|每)\s*天",
+        rf"(?:每天|每日|日均|一天|一天大概|每天大概|每天能|日均大概)\s*"
+        rf"(?:卖|售|销|能卖|客流|大概|约|大约|平均)?\s*"
+        rf"{_num}{_tail}\s*({_TRAFFIC_UNITS})",
+        rf"{_num}{_tail}\s*({_TRAFFIC_UNITS})\s*(?:/|每)\s*天",
     ):
         m = re.search(pat, text)
-        if m:
-            params["_traffic_unit"] = m.group(1)
-            return
+        if not m:
+            continue
+        if params.get("daily_traffic") is None:
+            val = _parse_number(m.group(1))
+            if val and val > 0:
+                params["daily_traffic"] = val
+        params["_traffic_unit"] = m.group(2)
+        return
 
 
 def _extract_unit_price_alias(text: str, params: dict) -> None:

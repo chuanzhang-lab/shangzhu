@@ -532,6 +532,45 @@ def test_cov_e11_dashboard_uses_user_unit():
         assert exp in md, f"unit={unit} 未渲染出「{exp}」：{[l for l in md.splitlines() if '盈亏平衡' in l]}"
 
 
+# ── E12：客流漏抽与误抽（D9）───────────────────────────────────────────────
+#
+# 「日均80桌」「一天卖80杯」都是高频说法，旧表抽不到：
+#   - keyword 有「每天卖」却没有「一天卖」；
+#   - 「日均」只认「日均客流/日均订单…」，不认裸「日均 + 数字 + 量词」。
+# 之所以不把裸「日均」直接加进 keyword：那会让「日均营业额3000」被当成客流 3000。
+# 改用「数字后必须紧跟量词」的结构约束补漏。
+#
+# 反向护栏：「每天营业额3000元」的 3000 是**钱**，不得被通用兜底抽成客流
+# （撑出 3000×客单价×30 的假营收）。复用 D4 的 reject_units。
+
+def test_cov_e12_missing_traffic_wordings():
+    """「日均80桌」「一天卖80杯」必须抽到客流（D9）。"""
+    for text, exp in {
+        "日均80桌": 80,
+        "一天卖80杯": 80,
+        "每天100单": 100,
+        "每天100人次": 100,
+        "一天做60份": 60,
+    }.items():
+        got = extract_params(text).get("daily_traffic")
+        assert got == exp, f"{text} → daily_traffic={got}（期望 {exp}）"
+
+
+def test_cov_e12_money_is_not_traffic():
+    """护栏：「每天营业额3000元」的钱不是客流。"""
+    for text in ("日均营业额3000元", "每天营业额3000元", "每天流水5000元"):
+        got = extract_params(text).get("daily_traffic")
+        assert got is None, f"{text} 被误抽为 daily_traffic={got}"
+
+
+def test_cov_e12_traffic_with_unit_not_broken():
+    """护栏：正常带量词的客流不得被 D9 改动影响。"""
+    p = extract_params("每天卖100碗，一碗18元")
+    assert p.get("daily_traffic") == 100, p
+    assert p.get("price_per_unit") == 18, p
+    assert p.get("_traffic_unit") == "碗", p
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
