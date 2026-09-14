@@ -26,6 +26,13 @@ from tools.financial_calculator import (
 from tools.pitfall_detector import _do_full_scan
 from router.param_extractor import extract_params
 
+# F1：时间口径必须与 field_model 同源（月营收 30 天/月 ⇒ 保本客流也按 360 天/年）。
+# 分开写死就会出现「营收按 360 天、保本按 365 天」的双重口径。
+try:
+    from field_model import DAYS_PER_MONTH
+except ImportError:  # pragma: no cover - 兜底，保持可导入性
+    DAYS_PER_MONTH = 30
+
 
 # ─── 输入解析（兼容 JSON dict 和自然语言字符串）────────────────────────────
 
@@ -817,6 +824,12 @@ def _project_trend_12m(params: dict) -> dict:
     cash = available if available is not None else 0
     breakeven_month = None
     months_to_profit = None
+    # F2：投资回收期（累计利润 ≥ 总投资）与盈亏平衡月（累计利润首次转正）
+    # 是**两个不同的概念**，旧实现把 breakeven_month 直接当 payback_months 输出，
+    # 于是「总投资 20 万、月利 1.6 万」被说成「1 个月回本」（真值 12.5 个月）。
+    # 没有总投资时回收期不可算，保持 None（不得用盈亏平衡月冒充）。
+    payback_month = None
+    total_invest = params.get("total_investment")
 
     for m in range(1, months_count + 1):
         s = season_map.get(((m - 1) % 12) + 1, 1.0) * seasonal
@@ -855,6 +868,10 @@ def _project_trend_12m(params: dict) -> dict:
                 months_to_profit = m
             if breakeven_month is None and cumulative_profit > 0:
                 breakeven_month = m
+            # F2：回收期 = 累计利润累计到「覆盖总投资」的那个月
+            if (payback_month is None and total_invest
+                    and cumulative_profit >= total_invest):
+                payback_month = m
 
     valid_profits = [m["profit"] for m in months if m["profit"] is not None]
     total_annual_profit = sum(valid_profits) if valid_profits else 0
@@ -900,7 +917,9 @@ def _project_trend_12m(params: dict) -> dict:
                 "npv_8pct": round(npv, 0),
                 "irr": round(irr, 4) if irr is not None else None,
                 "irr_percent": f"{irr*100:.1f}%" if irr is not None else "无法收敛",
-                "payback_months": breakeven_month,
+                # F2：回收期与盈亏平衡月分开输出（旧实现两者同一个值）
+                "payback_months": payback_month,
+                "breakeven_month": breakeven_month,
                 "discount_rate": "8%",
                 "cashflow_count": len(cashflows),
             }
@@ -1210,7 +1229,13 @@ def quick_scan(params_json: str) -> str:
                 params["price_per_unit"],
                 params["variable_cost_per_unit"]
             )
-            daily_be = round(be.get("breakeven_units", 0) / 365, 0) if "error" not in be else None
+            # F1 修复：`breakeven_units` 是**年度**保本单位数，旧实现除以 365 得日均，
+            # 而月营收按「客流 × 客单价 × 30」算 —— 一年 360 天。两个口径混用，
+            # 保本客流被系统性低估约 1.0~1.2%：按系统给的保本客流经营，
+            # 实际月亏 200~1240 元，系统却标「可达保本」。
+            # 统一到营收口径（30 天/月 ⇒ 360 天/年）。两处必须共用同一常量。
+            daily_be = (round(be.get("breakeven_units", 0) / (DAYS_PER_MONTH * 12), 0)
+                        if "error" not in be else None)
             rev_based_be = None
         # 补充「营收口径」保本：未给客单价（订阅/合同类生意）时，用 月固定÷(1-变动成本率)
         # 给出月均需营收，保证所有行业都能产出真实的收支平衡建议。

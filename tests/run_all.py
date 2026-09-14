@@ -69,6 +69,7 @@ import test_llm_settings as t30
 import test_simulator_upgrade as t31
 import test_vc_consistency as t32
 import test_extractor_coverage as t33
+import test_finance_correctness as t34
 
 
 def _bind(cls, fn):
@@ -163,6 +164,7 @@ if __name__ == "__main__":
         (t31, "SimulatorUpgrade · 收入序列 / 投资指标（类方法风格）"),
         (t32, "VcConsistency · 变动成本率一致性"),
         (t33, "ExtractorCoverage · 抽取器措辞矩阵 + 单位契约"),
+        (t34, "FinanceCorrectness · 财务公式外部验算 + 行业覆盖 + 0 值语义"),
     ):
         p, f, s = _run_module(mod, label)
         total_p += p

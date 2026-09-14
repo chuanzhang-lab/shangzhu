@@ -67,13 +67,45 @@ INPUT_SPECS: Dict[str, Dict[str, Any]] = {
 #   describe: 返回「带实际数字的公式说明」字符串
 #   _hidden : 中间量，不单独展示
 
+# ── 时间口径常量（F1）──────────────────────────────────────────────────
+# 「一个月按多少天算」是**全系统唯一**的口径，月营收、保本客流、年化成本
+# 必须共用它。旧实现里月营收写死 30、保本客流却除 365（=30.42 天/月），
+# 两个口径并存在同一份报表里，保本客流被系统性低估约 1.4%，
+# 按系统给的保本客流经营实际是亏的。此处定为唯一出处。
+DAYS_PER_MONTH = 30
+MONTHS_PER_YEAR = 12
+DAYS_PER_YEAR = DAYS_PER_MONTH * MONTHS_PER_YEAR   # 360，不是 365
+
+
+def _prod(vals):
+    """全部依赖非 None 才相乘（**结果可以是 0**）；任一依赖缺失则返回 None。
+
+    F9 修复：不能写成 `a * b or None` —— 0 是合法的计算结果
+    （变动成本率 0 ⇒ 月变动成本 0；无雇员 ⇒ 月人工 0），
+    而 `or None` 会把 0 当成 falsy 转成 None，于是「能算但算成 0」
+    被呈现成「算不出来 / 未知」。财务语境里这两者天差地别。
+    """
+    if any(v is None for v in vals):
+        return None
+    out = 1
+    for v in vals:
+        out = out * v
+    return out
+
+
+# 月固定成本的构成组件（F9：求和前要判断「是否全缺失」，不能靠 `or None`）
+_FIXED_COST_PARTS = ("monthly_rent", "monthly_labor", "utilities",
+                     "packaging", "commission", "other_fixed")
+
 DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
     # 月营收：用户直接给 或 客流×单价×30
     "monthly_revenue": {
         "deps": ["daily_traffic", "price_per_unit"],
-        "formula": lambda p: (p.get("daily_traffic") or 0) * (p.get("price_per_unit") or 0) * 30 or None,
+        "formula": lambda p: _prod([p.get("daily_traffic"), p.get("price_per_unit"),
+                                    DAYS_PER_MONTH]),
         "label": "月营收", "unit": "元/月", "kind": "override", "user_direct_ok": True,
-        "describe": lambda p: f"日均客流 {p.get('daily_traffic', 0):g} × 客单价 {p.get('price_per_unit', 0):g} × 30天",
+        "describe": lambda p: (f"日均客流 {p.get('daily_traffic', 0):g} × 客单价 "
+                               f"{p.get('price_per_unit', 0):g} × {DAYS_PER_MONTH}天"),
     },
     # 变动成本率：多路推导（用户 > unit_var÷price > 1−gm > None）
     # S3：gm 为 0~1 口径，故此处是 `1 − gm`（不再是 `1 − gm/100`）。
@@ -99,14 +131,19 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
     # 月人工现金：人数 × 人均薪资（中间量）
     "monthly_labor_cash": {
         "deps": ["employee_count", "avg_salary"],
-        "formula": lambda p: (p.get("employee_count") or 0) * (p.get("avg_salary") or 0) or None,
+        # F9：明确「0 个员工」（夫妻店/无人值守）时人工就是 0，不要求再报人均薪资
+        # —— 用户说「我不请人」时不会顺带说薪资，按缺失处理会让成本归因显示"未知"。
+        "formula": lambda p: (0 if p.get("employee_count") == 0
+                              else _prod([p.get("employee_count"), p.get("avg_salary")])),
         "label": "月人工", "unit": "元/月", "kind": "derived", "_hidden": True,
         "describe": lambda p: f"员工 {p.get('employee_count', 0):g} 人 × 人均 {p.get('avg_salary', 0):g} 元",
     },
     # 月人工（含负担）：裸薪 × (1+负担率)
     "monthly_labor": {
         "deps": ["monthly_labor_cash", "labor_burden"],
-        "formula": lambda p: (p.get("monthly_labor_cash") or 0) * (1 + (p.get("labor_burden") or 0)) or None,
+        # F9：labor_burden 缺失时按 0 计（不是缺失），但 monthly_labor_cash 缺失就真缺失。
+        "formula": lambda p: (None if p.get("monthly_labor_cash") is None
+                              else p["monthly_labor_cash"] * (1 + (p.get("labor_burden") or 0))),
         "label": "月人工", "unit": "元/月", "kind": "derived",
         "describe": lambda p: (f"员工 {p.get('employee_count', 0):g} 人 × 人均 {p.get('avg_salary', 0):g} 元"
                                + (f" ×(1+{p.get('labor_burden_rate', 0):.0%}负担)"
@@ -115,12 +152,12 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
     # 月固定成本：组件求和（有值组件之和，无值跳过，全 None → None）
     "monthly_fixed_cost": {
         "deps": ["monthly_rent", "monthly_labor"],
+        # F9：旧写法 `sum(...) or None` 在组件全为 None 时正确返回 None，
+        # 但组件有值而和为 0（月租 0、无雇员）时也会把 0 吞成 None。
+        # 改为先判「是否全缺失」，再求和。
         "formula": lambda p: (
-            sum(v for v in [
-                p.get("monthly_rent"), p.get("monthly_labor"),
-                p.get("utilities"), p.get("packaging"),
-                p.get("commission"), p.get("other_fixed"),
-            ] if v is not None) or None
+            None if all(p.get(k) is None for k in _FIXED_COST_PARTS)
+            else sum((p.get(k) or 0) for k in _FIXED_COST_PARTS)
         ),
         "label": "月固定成本", "unit": "元/月", "kind": "override",
         "describe": lambda p: _describe_fixed_cost(p),
@@ -128,7 +165,7 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
     # 月变动成本：月营收 × 变动成本率
     "monthly_variable_cost": {
         "deps": ["monthly_revenue", "variable_cost_ratio"],
-        "formula": lambda p: (p.get("monthly_revenue") or 0) * (p.get("variable_cost_ratio") or 0) or None,
+        "formula": lambda p: _prod([p.get("monthly_revenue"), p.get("variable_cost_ratio")]),
         "label": "月变动成本", "unit": "元/月", "kind": "derived",
         "describe": lambda p: f"月营收 {p.get('monthly_revenue', 0):g} × 变动成本率 {p.get('variable_cost_ratio', 0):.0%}",
     },
@@ -148,14 +185,14 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
     # 单位变动成本：客单价 × 变动成本率
     "variable_cost_per_unit": {
         "deps": ["price_per_unit", "variable_cost_ratio"],
-        "formula": lambda p: (p.get("price_per_unit") or 0) * (p.get("variable_cost_ratio") or 0) or None,
+        "formula": lambda p: _prod([p.get("price_per_unit"), p.get("variable_cost_ratio")]),
         "label": "单位变动成本", "unit": "元/单位", "kind": "derived",
         "describe": lambda p: f"客单价 {p.get('price_per_unit', 0):g} × 变动成本率 {p.get('variable_cost_ratio', 0):.0%}",
     },
     # 年固定成本：月固定 × 12
     "annual_fixed_cost": {
         "deps": ["monthly_fixed_cost"],
-        "formula": lambda p: (p.get("monthly_fixed_cost") or 0) * 12 or None,
+        "formula": lambda p: _prod([p.get("monthly_fixed_cost"), MONTHS_PER_YEAR]),
         "label": "年固定成本", "unit": "元/年", "kind": "derived",
         "describe": lambda p: f"月固定成本 {p.get('monthly_fixed_cost', 0):g} × 12",
     },
@@ -370,7 +407,7 @@ def _rule_revenue_vs_traffic_price(params: Dict[str, Any]) -> Optional[str]:
     traffic = params.get("daily_traffic")
     price = params.get("price_per_unit")
     if all(isinstance(x, (int, float)) and x > 0 for x in (rev, traffic, price)):
-        implied = traffic * price * 30
+        implied = traffic * price * DAYS_PER_MONTH
         if abs(implied - rev) / rev > 0.5:
             return (f"月营收 {rev:,.0f} 与「日均{traffic:g}×单价{price:g}×30天」"
                     f"推算 {implied:,.0f} 差异超 50%，请确认口径")
@@ -446,7 +483,7 @@ def conflict_resolution_ops(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     traffic = params.get("daily_traffic")
     price = params.get("price_per_unit")
     if all(isinstance(x, (int, float)) and x > 0 for x in (rev, traffic, price)):
-        implied = traffic * price * 30
+        implied = traffic * price * DAYS_PER_MONTH
         if abs(implied - rev) / rev > 0.5:
             # 方案A：按客流×单价×30 修正月营收
             ops.append({
@@ -456,7 +493,7 @@ def conflict_resolution_ops(params: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "hypothesis": None,
             })
             # 方案B：按月营收反推客流
-            implied_traffic = round(rev / (price * 30), 0)
+            implied_traffic = round(rev / (price * DAYS_PER_MONTH), 0)
             ops.append({
                 "propose": "set", "label": f"客流改为 {implied_traffic:.0f}/天（按月营收反推）",
                 "changes": {"daily_traffic": implied_traffic},
