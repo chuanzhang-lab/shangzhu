@@ -313,9 +313,12 @@ _FIELD_PATTERNS = [
         ],
         "position": "before",
         "units": ["杯", "单", "人", "件", "碗", "份", "条", "桌"],
-        # D9：复用 D4 的量纲护栏。「每天营业额3000」里的 3000 是**钱**不是客流，
-        # 通用兜底路径会把它抽成 daily_traffic=3000（撑出假营收）。
+        # D9：复用 D4 的量纲护栏。「每天营业额3000元」靠 reject_units 挡住；
+        # 不带「元」的「每天营业额3000」需靠语境词护栏（reject_context）挡住——
+        # 关键词后若出现「营业额/营收/收入/流水/销售额」等钱的语境词，
+        # 则数字是营收不是客流，跳过本字段抽取。
         "reject_units": ["元", "块", "万", "千"],
+        "reject_context": ["营业额", "营收", "收入", "流水", "销售额", "业绩"],
         "kw_position": {
             # 倒装: 数字在关键词前
             "杯/天": "after",
@@ -462,6 +465,10 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
     # 「变动成本6元」的 6 带元 → 是**金额**不是率，必须拒收，否则会被当成 6%
     # （引擎按「>1 则 /100」归一），毛利率凭空变 94%。
     reject_units = field_def.get("reject_units")
+    # 语境护栏：关键词后紧跟的是其他概念的语境词（不是本字段要的数字）。
+    # 用于 daily_traffic 的「每天」兜底——「每天营业额3000」里「营业额」表明
+    # 这是钱不是客流，即使 3000 不带「元」也应拒收。
+    reject_context = field_def.get("reject_context")
     # F8：上限护栏。命中但超限时**不返回**，让它继续尝试下一侧/下一阶段。
     # 「2个员工每人6000」里，阶段1 会把「每**人**6000」的「人」当人数单位抓成
     # 6000 人；旧实现直接返回 6000，再被后处理「>200 且无 N人 写法」丢弃 →
@@ -506,6 +513,9 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
             # D4：量纲不符 → 该数字带金额单位，不是本率字段的值，跳过而非误收。
             if reject_units and _has_number_with_unit(s, reject_units):
                 continue
+            # 语境不符 → 关键词后紧跟其他概念的语境词（如「营业额」），跳过。
+            if reject_context and _has_context_word(s, reject_context):
+                continue
             value = _find_number(s, units, strict=strict)
             if value is not None:
                 return value
@@ -524,6 +534,22 @@ def _has_number_with_unit(text: str, units) -> bool:
     return re.search(r"\d+(?:\.\d+)?\s*(?:" + "|".join(units) + r")",
                      text) is not None
 
+
+def _has_context_word(text: str, words) -> bool:
+    """text 开头附近是否出现指定语境词（reject_context 护栏用）。
+
+    只检查 text 前 10 个字符（关键词与数字之间的区域），避免跨段误判。
+    例如「每天」后紧跟「营业额」→ 是日营收，不是客流；
+    但「每天卖80杯，营业额不错」里「营业额」在逗号后，属于下一分句，不应触发。
+    """
+    if not text:
+        return False
+    # 只看关键词到第一个数字之间的区域（最多前 10 字）
+    head = text[:10]
+    for w in words:
+        if w in head:
+            return True
+    return False
 
 def _find_number(text: str, units, strict: bool = False,
                 unit_only: bool = False) -> Optional[float]:
@@ -830,6 +856,43 @@ def _extract_unit_cost_alias(text: str, params: dict) -> None:
             params["unit_variable_cost"] = val
 
 
+# 日营收/日营业额语境词：这些词出现时，数字是钱不是客流。
+_DAILY_REVENUE_WORDS = "营业额|营收|流水|收入|销售额|业绩"
+
+def _extract_daily_revenue(text: str, params: dict) -> None:
+    """日营收提取（F3 遗留边界修复）：「每天营业额3000」/「日均营收3000元」→ 月营收.
+
+    问题：不带「元」的「每天营业额3000」旧版会被 daily_traffic 的「每天」兜底
+    抽成客流 3000（撑出假营收=3000×DAYS_PER_MONTH×客单价）；带「元」已靠 reject_units 挡住，
+    但挡住后没有正向提取——用户说了日营收，系统完全没记住。
+
+    修复：独立正则（与 _extract_traffic_unit 对称），匹配「时间词 + 营收词 + 数字」，
+    转月营收 = 日值 × DAYS_PER_MONTH（field_model 唯一出处）。
+
+    以 `_daily_revenue_src` 标注来源，供 param_sources 使用。
+    """
+    if params.get("monthly_revenue") is not None:
+        return  # 已有月营收，不覆盖
+    _num = r"(\d+(?:\.\d+)?)"
+    _money_unit = r"(?:\s*[元块])?"   # 单位可选（正是不带「元」的漏抽场景）
+    _scale = r"(?:\s*(万|千))?"       # 可选大单位
+    _time = r"(?:每天|每日|日均|一天|一天大概|每天大概|每天能|日均大概|日)"
+    for pat in (
+        rf"{_time}\s*(?:{_DAILY_REVENUE_WORDS})\s*{_num}{_money_unit}{_scale}",
+    ):
+        m = re.search(pat, text)
+        if not m:
+            continue
+        # 直接拼数字+单位串让 _parse_number 解析（它能处理「3万」「3千」「3000」）
+        num_str = m.group(1) + (m.group(2) or "")
+        val = _parse_number(num_str)
+        if val and val > 0:
+            # 延迟导入避免循环（param_guard 同模式）
+            from field_model import DAYS_PER_MONTH
+            params["monthly_revenue"] = round(val * DAYS_PER_MONTH, 2)
+            params["_daily_revenue_src"] = f"日{val:g}元 × {DAYS_PER_MONTH}天"
+        return
+
 def _extract_traffic_unit(text: str, params: dict) -> None:
     """客流与客流单位（D8/D9）：「每天卖100碗」→ 100 碗。
 
@@ -980,6 +1043,10 @@ def extract_params(text: str) -> Dict:
     #    但 E5 认成本、E3 靠「成本」前置词护栏跳过，互不抢词。
     _extract_unit_cost_alias(text, params)
     _extract_unit_price_alias(text, params)
+
+    # ── 补充抽取：日营收（F3 边界「每天营业额3000」→ 月营收）──
+    #    必须在 _extract_traffic_unit 之前：日营收词明确时，数字是钱不是客流。
+    _extract_daily_revenue(text, params)
 
     # ── 补充抽取：客流单位（D8「每天卖100碗」→「碗」）──
     _extract_traffic_unit(text, params)

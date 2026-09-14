@@ -173,17 +173,23 @@ def test_cost_structure_bad_json():
     assert "error" in d
 
 
-# ── 敏感性分析 ────────────────────────────────────────────────────────────
+# ── 敏感性分析（F3：变动成本随营收联动，固定成本独立波动）────────────────
 def test_sensitivity():
-    d = _call(sensitivity_analysis, base_revenue=60000, base_cost=48000,
+    # 典型餐饮：月营收 6 万，固定成本 3 万（租金+人工+水电），变动成本 1.8 万（食材+包装+佣金）
+    # 变动成本率 = 18000/60000 = 30%，月利润 = 12000
+    d = _call(sensitivity_analysis, base_revenue=60000, fixed_cost=30000, variable_cost=18000,
               revenue_range_percent=20, cost_range_percent=20, steps=3)
     assert d["base_profit"] == 12000, d
     assert len(d["sensitivity_matrix"]) == 3
-    # 最坏：收入-20% 成本+20% → 60000*0.8 - 48000*1.2 = 48000 - 57600 = -9600
-    assert d["worst_case"]["profit"] == -9600.0, d
-    # 最好：收入+20% 成本-20% → 60000*1.2 - 48000*0.8 = 72000 - 38400 = 33600
-    assert d["best_case"]["profit"] == 33600.0, d
-    assert d["profit_range"] == 33600 - (-9600)
+    # 最坏：营收-20% → 变动成本同步-20%，固定成本+20%
+    #   rev=48000, var_c=14400, fix_c=36000, profit=48000-50400=-2400
+    assert d["worst_case"]["profit"] == -2400.0, d
+    # 最好：营收+20% → 变动成本同步+20%，固定成本-20%
+    #   rev=72000, var_c=21600, fix_c=24000, profit=72000-45600=26400
+    assert d["best_case"]["profit"] == 26400.0, d
+    assert d["profit_range"] == 26400 - (-2400)
+    # 口径说明必须存在
+    assert "变动成本随营收" in d["note"]
 
 
 # ── M2：None 消费一致性（2026-08-19）──────────────────────────────────

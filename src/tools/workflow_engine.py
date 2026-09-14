@@ -366,6 +366,7 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
 
     # 月营收：优先用户直接给的数值（支持数组：多期收入序列）
     revenue_override = raw_params.get("monthly_revenue") or raw_params.get("initial_monthly_revenue")
+    _daily_src = raw_params.get("_daily_revenue_src")  # F3 边界：日营业额换算
     if revenue_override:
         if isinstance(revenue_override, (list, tuple)) and len(revenue_override) > 0:
             # 多期收入序列：保留为数组，derive() 用第一个值做单期推算
@@ -374,7 +375,11 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
             src["monthly_revenue"] = f"[用户] 多期序列({len(revenue_override)}期)"
         else:
             p["monthly_revenue"] = revenue_override
-            src["monthly_revenue"] = "[用户]"
+            # 日营业额换算的来源标注：告诉用户这是从日值得出的月值
+            if _daily_src:
+                src["monthly_revenue"] = f"[推算] {_daily_src}"
+            else:
+                src["monthly_revenue"] = "[用户]"
     # 否则让 derive() 从 traffic×price×30 算（src 在下面统一标注）
 
     # 固定成本组件字段（水电/包装/提成/其他固定）——用户给的输入
@@ -1268,11 +1273,17 @@ def quick_scan(params_json: str) -> str:
             rw = {"runway_months": None, "note": "固定成本未提供，跑道无法计算"}
 
         # ── 模块 3: 敏感性 ──
-        total_monthly_cost = (fixed_cost or 0) + monthly_var_cost
+        # F3 修复：固定/变动成本分传，变动成本随营收联动（边际贡献口径）
+        _fix_c = fixed_cost or 0
+        _var_c = monthly_var_cost or 0
         if params.get("monthly_profit") is None:
             sens = {"error": "输入不全，无法算敏感性"}
         else:
-            sens = _calc_sensitivity(params["monthly_revenue"], total_monthly_cost)
+            sens = _calc_sensitivity(
+                params["monthly_revenue"],
+                fixed_cost=_fix_c,
+                variable_cost=_var_c,
+            )
 
         # ── 模块 4: 陷阱 ──
         # 客单价/变动成本未知（为 0）时不跑定价检查，避免“定价低于成本”误报（缺失≠0）

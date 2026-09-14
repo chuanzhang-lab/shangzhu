@@ -169,31 +169,66 @@ def _calc_revenue_projection(
 
 def _calc_sensitivity(
     base_revenue: float,
-    base_cost: float,
+    fixed_cost: float,
+    variable_cost: float,
     revenue_range_percent: float = 20,
     cost_range_percent: float = 20,
     steps: int = 3,
 ) -> dict:
-    """返回纯 dict 的敏感性分析"""
+    """返回纯 dict 的敏感性分析。
+
+    口径（显式声明，经 CALCULATION_PHILOSOPHY 定夺）：
+    - 营收变动 → 变动成本**同比例联动**（量变则食材/包装/佣金等比例增减）；
+    - 固定成本独立波动（租金/薪资等冲击与客流量无关）；
+    - 因此总成本 = fixed_cost×(1+固定成本波动) + variable_cost×(1+营收波动)。
+
+    这是管理会计标准做法：边际贡献（营收-变动成本）随量同比例变动，
+    固定成本是经营杠杆不随量变化。若把总成本与营收做独立变量，
+    会导致 worst case 双重打击（营收-20% 同时成本+20%），
+    把本来盈利的项目算成亏损，误导风险判断。
+    """
+    base_cost = fixed_cost + variable_cost
     base_profit = base_revenue - base_cost
     scenarios = []
     min_p, max_p = float("inf"), float("-inf")
+
     for i in range(steps):
         rp = -revenue_range_percent + (2 * revenue_range_percent * i / (steps - 1)) if steps > 1 else 0
         for j in range(steps):
             cp = -cost_range_percent + (2 * cost_range_percent * j / (steps - 1)) if steps > 1 else 0
             rev = base_revenue * (1 + rp / 100)
-            cost = base_cost * (1 + cp / 100)
+            # F3 修复：变动成本随营收联动，固定成本独立波动
+            var_c = variable_cost * (1 + rp / 100)
+            fix_c = fixed_cost * (1 + cp / 100)
+            cost = fix_c + var_c
             p = round(rev - cost, 2)
-            scenarios.append({"revenue_change": f"{round(rp,1)}%", "cost_change": f"{round(cp,1)}%", "profit": p})
+            # 命名三个关键场景
+            if rp == -revenue_range_percent and cp == cost_range_percent:
+                label = "悲观"
+            elif rp == 0 and cp == 0:
+                label = "中性"
+            elif rp == revenue_range_percent and cp == -cost_range_percent:
+                label = "乐观"
+            else:
+                label = None
+            scenario = {
+                "revenue_change": f"{round(rp,1)}%",
+                "cost_change": f"{round(cp,1)}%",
+                "profit": p,
+            }
+            if label:
+                scenario["scenario"] = label
+            scenarios.append(scenario)
             if p < min_p: min_p = p
             if p > max_p: max_p = p
+
     return {
         "base_profit": base_profit,
         "scenarios": scenarios,
         "worst_profit": min_p,
         "best_profit": max_p,
         "profit_range": round(max_p - min_p, 2),
+        "note": "变动成本随营收同比例变动，固定成本独立波动（边际贡献口径）",
     }
 
 
@@ -681,7 +716,8 @@ def build_cost_structure(
 @tool
 def sensitivity_analysis(
     base_revenue: float,
-    base_cost: float,
+    fixed_cost: float,
+    variable_cost: float,
     revenue_range_percent: float = 20,
     cost_range_percent: float = 20,
     steps: int = 3,
@@ -689,16 +725,20 @@ def sensitivity_analysis(
     """
     敏感性分析：收入与成本在不同变化幅度下的利润矩阵。
 
+    口径：变动成本随营收同比例联动（边际贡献口径），固定成本独立波动。
+
     参数:
         base_revenue: 基准收入
-        base_cost: 基准成本
+        fixed_cost: 固定成本（租金/薪资等，不随量变化）
+        variable_cost: 变动成本（食材/包装/佣金等，随量同比例变化）
         revenue_range_percent: 收入波动范围百分比，默认 20
-        cost_range_percent: 成本波动范围百分比，默认 20
+        cost_range_percent: 固定成本波动范围百分比，默认 20
         steps: 步数，默认 3（悲观/中性/乐观）
 
     返回: JSON 字符串，包含利润矩阵、最坏/最好情况
     """
     try:
+        base_cost = fixed_cost + variable_cost
         base_profit = base_revenue - base_cost
         matrix = []
         min_profit = float("inf")
@@ -710,34 +750,39 @@ def sensitivity_analysis(
             rev_pct = -revenue_range_percent + (2 * revenue_range_percent * i / (steps - 1)) if steps > 1 else 0
             row = []
             for j in range(steps):
-                cost_pct = -cost_range_percent + (2 * cost_range_percent * j / (steps - 1)) if steps > 1 else 0
+                fix_pct = -cost_range_percent + (2 * cost_range_percent * j / (steps - 1)) if steps > 1 else 0
                 rev = base_revenue * (1 + rev_pct / 100)
-                cost = base_cost * (1 + cost_pct / 100)
+                # F3 修复：变动成本随营收联动，固定成本独立波动
+                var_c = variable_cost * (1 + rev_pct / 100)
+                fix_c = fixed_cost * (1 + fix_pct / 100)
+                cost = fix_c + var_c
                 profit = round(rev - cost, 2)
                 row.append({
                     "revenue_change": f"{round(rev_pct, 1)}%",
-                    "cost_change": f"{round(cost_pct, 1)}%",
+                    "fixed_cost_change": f"{round(fix_pct, 1)}%",
                     "revenue": round(rev, 2),
                     "cost": round(cost, 2),
                     "profit": profit
                 })
                 if profit < min_profit:
                     min_profit = profit
-                    worst_case = f"收入{round(rev_pct,1)}% / 成本{round(cost_pct,1)}%"
+                    worst_case = f"营收{round(rev_pct,1)}% / 固定成本{round(fix_pct,1)}%"
                 if profit > max_profit:
                     max_profit = profit
-                    best_case = f"收入{round(rev_pct,1)}% / 成本{round(cost_pct,1)}%"
+                    best_case = f"营收{round(rev_pct,1)}% / 固定成本{round(fix_pct,1)}%"
             matrix.append(row)
 
         return json.dumps({
             "base_profit": base_profit,
             "base_revenue": base_revenue,
+            "base_fixed_cost": fixed_cost,
+            "base_variable_cost": variable_cost,
             "base_cost": base_cost,
             "sensitivity_matrix": matrix,
             "worst_case": {"profit": min_profit, "scenario": worst_case},
             "best_case": {"profit": max_profit, "scenario": best_case},
             "profit_range": round(max_profit - min_profit, 2),
-            "note": "利润范围越大，说明项目对收入和成本变动越敏感，风险越高。"
+            "note": "变动成本随营收同比例变动，固定成本独立波动（边际贡献口径）。利润范围越大风险越高。"
         }, ensure_ascii=False, indent=2)
 
     except Exception as e:
