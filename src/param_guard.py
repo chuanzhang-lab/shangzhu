@@ -403,12 +403,17 @@ def check_derived_consistency(params: Dict[str, Any]) -> List[Dict[str, str]]:
     traffic = params.get("daily_traffic")
     price = params.get("price_per_unit")
     if all(isinstance(x, (int, float)) and x > 0 for x in (rev, traffic, price)):
-        implied = traffic * price * 30
+        # 延迟导入：field_model 依赖 param_guard，顶层 import 会循环。
+        # 月营收公式只此一处（field_model.monthly_revenue_from_traffic），
+        # 此处不再自己写 `traffic * price * 30`。
+        from field_model import monthly_revenue_from_traffic, DAYS_PER_MONTH
+        implied = monthly_revenue_from_traffic(traffic, price)
         if abs(implied - rev) / rev > 0.5:
             issues.append({
                 "field": "monthly_revenue",
                 "message": (
-                    f"月营收 {rev:,.0f} 与「日均{traffic}×单价{price}×30天」"
+                    f"月营收 {rev:,.0f} 与「日均{traffic}×单价{price}"
+                    f"×{DAYS_PER_MONTH}天」"
                     f"推算 {implied:,.0f} 差异超 50%，请确认口径"
                 ),
             })

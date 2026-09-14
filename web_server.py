@@ -462,7 +462,7 @@ def _build_single_variable_sensitivity(params: dict, variable: str) -> dict:
 
     if variable == "daily_traffic":
         if price > 0 and (1 - vc_ratio) > 0:
-            breakeven_value = round(fixed_cost / (price * 30 * (1 - vc_ratio)), 1)
+            breakeven_value = round(fixed_cost / (price * DAYS_PER_MONTH * (1 - vc_ratio)), 1)
     elif variable == "monthly_rent":
         # 利润 = revenue×(1-vc_ratio) - rent - (fixed_cost - rent) - revenue×vc_ratio
         # 简化：利润 = revenue - fixed_cost - revenue×vc_ratio
@@ -484,7 +484,7 @@ def _build_single_variable_sensitivity(params: dict, variable: str) -> dict:
             breakeven_value = round((contribution_margin - other_labor + rent) / avg_salary, 1) if avg_salary else None
     elif variable == "price_per_unit":
         if daily_traffic > 0 and (1 - vc_ratio) > 0:
-            breakeven_value = round(fixed_cost / (daily_traffic * 30 * (1 - vc_ratio)), 1)
+            breakeven_value = round(fixed_cost / (daily_traffic * DAYS_PER_MONTH * (1 - vc_ratio)), 1)
 
     if breakeven_value is None or breakeven_value <= 0:
         return {
@@ -512,7 +512,10 @@ def _build_single_variable_sensitivity(params: dict, variable: str) -> dict:
         pct = -0.5 + i * 0.1  # -50% 到 +50%
         v = breakeven_value * (1 + pct) if breakeven_value > 0 else 0
         if variable == "daily_traffic":
-            rev = v * price * 30
+            # 月营收公式唯一出处在 field_model（曾在本文件手写 `v * price * 30`，
+            # 与保本侧的 365 口径并存 → 见 F1）
+            from field_model import monthly_revenue_from_traffic, DAYS_PER_MONTH
+            rev = monthly_revenue_from_traffic(v, price)
             profit = rev * (1 - vc_ratio) - fixed_cost
         elif variable == "monthly_rent":
             other_fixed = fixed_cost - rent

@@ -14,6 +14,7 @@
 """
 import sys
 import os
+import io
 import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -227,6 +228,40 @@ def test_fin_f9_missing_input_still_none():
     d = r[0] if isinstance(r, tuple) else r
     assert d.get("monthly_revenue") is None, d
     assert d.get("monthly_labor") is None, d
+
+
+# ── 不变量：时间口径不得再被硬编码 ─────────────────────────────────────────
+#
+# F1 的根因不是「算错了」，而是「同一个量在两处各写了一遍不同的值」
+# （营收 30 天/月、保本 365 天/年）。修完一个数字没用，必须禁止再写数字。
+# 这条测试是**结构性护栏**：以后谁再写 `* 30` 或 `/ 365` 就红。
+
+def test_invariant_no_hardcoded_time_basis():
+    """时间口径只能来自 field_model.DAYS_PER_MONTH / DAYS_PER_YEAR。"""
+    import glob
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 显式白名单：与时间口径无关，但写法会命中正则。每条必须写清理由，
+    # 这样以后有人再加「* 30」就得显式登记，不能悄悄混过去。
+    allowlist = {
+        # 归因条形图的像素长度，30 是画布宽度，不是「一个月多少天」
+        "src/router/formatter.py: bar_len": True,
+    }
+    bad = []
+    for path in glob.glob(os.path.join(root, "src", "**", "*.py"), recursive=True) + \
+                [os.path.join(root, "web_server.py")]:
+        rel = os.path.relpath(path, root)
+        for ln, line in enumerate(io.open(path, encoding="utf-8").read().splitlines(), 1):
+            if line.strip().startswith("#"):
+                continue
+            if "DAYS_PER_MONTH" in line or "DAYS_PER_YEAR" in line:
+                continue
+            if re.search(r'\*\s*30\b|\b30\s*天|/\s*365|\*\s*365', line):
+                key = f"{rel}: {line.strip().split('=')[0].strip()}"
+                if allowlist.get(key):
+                    continue
+                bad.append(f"{rel}:{ln}: {line.strip()[:90]}")
+    assert not bad, "发现硬编码的时间口径，请改用 field_model 的常量：\n" + "\n".join(bad)
 
 
 if __name__ == "__main__":

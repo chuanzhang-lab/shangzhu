@@ -14,6 +14,8 @@ import json
 from langchain.tools import tool
 
 from tools.workflow_engine import _fill_params, _resolve_industry, INDUSTRY_TEMPLATES, FALLBACK_TEMPLATE, _parse_tool_input
+# 时间口径唯一出处（F1）：不要在本文件再写 `* 30`。
+from field_model import DAYS_PER_MONTH
 
 
 # ─── 建议规则 ────────────────────────────────────────────────────────────────
@@ -104,8 +106,8 @@ def _check_issues(params: dict) -> list[dict]:
         # traffic = 固定成本 / (price * 30 * (1-vc))
         if price > 0 and params["variable_cost_ratio"] < 1:
             breakeven_traffic = params["monthly_fixed_cost"] / (
-                price * 30 * (1 - params["variable_cost_ratio"])
-            ) / 30
+                price * DAYS_PER_MONTH * (1 - params["variable_cost_ratio"])
+            ) / DAYS_PER_MONTH
             if params["daily_traffic"] < breakeven_traffic * 0.8:
                 issues.append({
                     "code": "low_traffic",
@@ -178,7 +180,7 @@ def _solve_negative_profit(params: dict) -> list[dict]:
         # 提价 delta → 月增收入 = traffic * 30 * (1-vc) * delta_price
         # 即 delta_price = loss / (traffic * 30 * (1 - vc))
         if (1 - vc_ratio) > 0:
-            delta = loss / (traffic * 30 * (1 - vc_ratio))
+            delta = loss / (traffic * DAYS_PER_MONTH * (1 - vc_ratio))
             new_price = round(price + delta, 1)
             suggestions.append({
                 "target_param": "price_per_unit",
@@ -259,7 +261,7 @@ def _suggest_raise_price(params: dict) -> list[dict]:
     conservative = max(price + 5, range_info[0])
     delta = conservative - price
     if traffic > 0 and (1 - vc_ratio) > 0:
-        profit_gain = traffic * 30 * (1 - vc_ratio) * delta
+        profit_gain = traffic * DAYS_PER_MONTH * (1 - vc_ratio) * delta
         suggestions.append({
             "target_param": "price_per_unit",
             "current": price,
@@ -273,7 +275,7 @@ def _suggest_raise_price(params: dict) -> list[dict]:
     aggressive = (range_info[0] + range_info[1]) / 2
     if aggressive > conservative:
         delta2 = aggressive - price
-        profit_gain2 = traffic * 30 * (1 - vc_ratio) * delta2
+        profit_gain2 = traffic * DAYS_PER_MONTH * (1 - vc_ratio) * delta2
         suggestions.append({
             "target_param": "price_per_unit",
             "current": price,

@@ -77,6 +77,20 @@ MONTHS_PER_YEAR = 12
 DAYS_PER_YEAR = DAYS_PER_MONTH * MONTHS_PER_YEAR   # 360，不是 365
 
 
+def monthly_revenue_from_traffic(daily_traffic, price_per_unit):
+    """月营收 = 日均客流 × 客单价 × DAYS_PER_MONTH —— **唯一出处**。
+
+    审计发现这个公式曾在 4 处各写一遍（field_model ×2 / param_guard / web_server），
+    其中两处是裸 `30`、保本侧还出现过 `365` 口径。改口径时必然只改到一部分，
+    F1（营收按 360 天、保本按 365 天）就是这么来的。其余一律调用本函数。
+
+    依赖缺失返回 None（与 _prod 同语义）；结果为 0 就是 0，不是缺失。
+    """
+    if daily_traffic is None or price_per_unit is None:
+        return None
+    return daily_traffic * price_per_unit * DAYS_PER_MONTH
+
+
 def _prod(vals):
     """全部依赖非 None 才相乘（**结果可以是 0**）；任一依赖缺失则返回 None。
 
@@ -407,9 +421,9 @@ def _rule_revenue_vs_traffic_price(params: Dict[str, Any]) -> Optional[str]:
     traffic = params.get("daily_traffic")
     price = params.get("price_per_unit")
     if all(isinstance(x, (int, float)) and x > 0 for x in (rev, traffic, price)):
-        implied = traffic * price * DAYS_PER_MONTH
+        implied = monthly_revenue_from_traffic(traffic, price)
         if abs(implied - rev) / rev > 0.5:
-            return (f"月营收 {rev:,.0f} 与「日均{traffic:g}×单价{price:g}×30天」"
+            return (f"月营收 {rev:,.0f} 与「日均{traffic:g}×单价{price:g}×{DAYS_PER_MONTH}天」"
                     f"推算 {implied:,.0f} 差异超 50%，请确认口径")
     return None
 
@@ -483,13 +497,13 @@ def conflict_resolution_ops(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     traffic = params.get("daily_traffic")
     price = params.get("price_per_unit")
     if all(isinstance(x, (int, float)) and x > 0 for x in (rev, traffic, price)):
-        implied = traffic * price * DAYS_PER_MONTH
+        implied = monthly_revenue_from_traffic(traffic, price)
         if abs(implied - rev) / rev > 0.5:
             # 方案A：按客流×单价×30 修正月营收
             ops.append({
                 "propose": "set", "label": f"月营收改为 {implied:,.0f}（按客流×单价×30）",
                 "changes": {"monthly_revenue": implied},
-                "reason": f"客流{traffic:g}×单价{price:g}×30天 = {implied:,.0f}",
+                "reason": f"客流{traffic:g}×单价{price:g}×{DAYS_PER_MONTH}天 = {implied:,.0f}",
                 "hypothesis": None,
             })
             # 方案B：按月营收反推客流

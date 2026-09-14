@@ -28,10 +28,11 @@ from router.param_extractor import extract_params
 
 # F1：时间口径必须与 field_model 同源（月营收 30 天/月 ⇒ 保本客流也按 360 天/年）。
 # 分开写死就会出现「营收按 360 天、保本按 365 天」的双重口径。
-try:
-    from field_model import DAYS_PER_MONTH
-except ImportError:  # pragma: no cover - 兜底，保持可导入性
-    DAYS_PER_MONTH = 30
+#
+# 注意：**不要**给这个 import 加 try/except 兜底。field_model 是同项目的
+# 必选依赖，导入失败就是真错误；静默 fallback 成 30 会让「改了口径常量却
+# 只有一半公式生效」这种最难查的故障再次发生（本项目已因此出过 F1）。
+from field_model import DAYS_PER_MONTH, DAYS_PER_YEAR
 
 
 # ─── 输入解析（兼容 JSON dict 和自然语言字符串）────────────────────────────
@@ -425,7 +426,7 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
     # ── 月营收 src 标注 ──
     if "monthly_revenue" not in src:
         if p.get("monthly_revenue") is not None:
-            src["monthly_revenue"] = "[推算] 从客流×单价×30天"
+            src["monthly_revenue"] = f"[推算] 从客流×单价×{DAYS_PER_MONTH}天"
         else:
             src["monthly_revenue"] = "[缺失] 月营收未提供（且缺客流或客单价）"
 
@@ -1234,7 +1235,7 @@ def quick_scan(params_json: str) -> str:
             # 保本客流被系统性低估约 1.0~1.2%：按系统给的保本客流经营，
             # 实际月亏 200~1240 元，系统却标「可达保本」。
             # 统一到营收口径（30 天/月 ⇒ 360 天/年）。两处必须共用同一常量。
-            daily_be = (round(be.get("breakeven_units", 0) / (DAYS_PER_MONTH * 12), 0)
+            daily_be = (round(be.get("breakeven_units", 0) / DAYS_PER_YEAR, 0)
                         if "error" not in be else None)
             rev_based_be = None
         # 补充「营收口径」保本：未给客单价（订阅/合同类生意）时，用 月固定÷(1-变动成本率)
