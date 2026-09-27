@@ -47,7 +47,7 @@ _FIELD_TYPES = {
 
 def _resolve_config_path() -> Path:
     """解析配置文件路径（复用 llm_advisor 的路径逻辑）。"""
-    env_ws = os.getenv("COZE_WORKSPACE_PATH", "").strip()
+    env_ws = os.getenv("SHANGZHU_WORKSPACE_PATH", "").strip()
     if env_ws:
         p = Path(env_ws) / "config" / "agent_llm_config.json"
         if p.is_file():

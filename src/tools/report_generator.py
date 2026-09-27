@@ -1,8 +1,7 @@
 """
-报告生成工具 — PDF/Excel 输出
+报告生成工具 — PDF/Excel 输出（本地生成）
 
-Coze SDK 可用时使用 DocumentGenerationClient，
-不可用时本地生成文件。
+全部本地生成：Excel 走 openpyxl，PDF/DOCX 降级保存为 Markdown 文件。
 """
 
 import json
@@ -15,13 +14,6 @@ from langchain.tools import tool
 # output/ 目录文件数上限与 TTL，防止长期运行磁盘无限增长
 _MAX_OUTPUT_FILES = 50
 _OUTPUT_FILE_TTL_SECONDS = 3600 * 24  # 24 小时
-
-# 尝试导入 Coze SDK
-try:
-    from coze_coding_dev_sdk import DocumentGenerationClient, DocumentFormat
-    _HAS_COZE_SDK = True
-except ImportError:
-    _HAS_COZE_SDK = False
 
 # 尝试导入 openpyxl（本地 Excel 生成）
 try:
@@ -60,11 +52,6 @@ def _cleanup_output_dir(output_dir: str) -> None:
 
 def _generate_excel_url(data: list[dict], title: str, sheet_name: str = "Sheet1") -> str:
     """生成 Excel 文件并返回路径"""
-    if _HAS_COZE_SDK:
-        client = DocumentGenerationClient()
-        return client.create_xlsx_from_list(data, title, sheet_name)
-
-    # 本地生成
     if not _HAS_OPENPYXL:
         raise RuntimeError("openpyxl 未安装，无法生成 Excel")
 
@@ -92,12 +79,7 @@ def _generate_excel_url(data: list[dict], title: str, sheet_name: str = "Sheet1"
 
 
 def _generate_pdf_url(markdown_content: str, title: str) -> str:
-    """生成 PDF 文件，Coze 不可用时保存为 Markdown"""
-    if _HAS_COZE_SDK:
-        client = DocumentGenerationClient()
-        return client.create_pdf_from_markdown(markdown_content, title)
-
-    # 本地降级：保存为 Markdown 文件
+    """生成报告文件，本地保存为 Markdown"""
     output_dir = os.path.join(os.path.dirname(__file__), "..", "..", "output")
     os.makedirs(output_dir, exist_ok=True)
     _cleanup_output_dir(output_dir)  # R2 修复：写文件前先清理过期/超限文件
@@ -108,12 +90,7 @@ def _generate_pdf_url(markdown_content: str, title: str) -> str:
 
 
 def _generate_docx_url(markdown_content: str, title: str) -> str:
-    """生成 DOCX 文件，Coze 不可用时保存为 Markdown"""
-    if _HAS_COZE_SDK:
-        client = DocumentGenerationClient()
-        return client.create_docx_from_markdown(markdown_content, title)
-
-    # 本地降级：保存为 Markdown 文件
+    """生成 DOCX 报告，本地保存为 Markdown"""
     output_dir = os.path.join(os.path.dirname(__file__), "..", "..", "output")
     os.makedirs(output_dir, exist_ok=True)
     _cleanup_output_dir(output_dir)  # R2 修复：写文件前先清理过期/超限文件
@@ -144,10 +121,10 @@ def generate_financial_report(
 
         return json.dumps({
             "success": True,
-            "format": "PDF" if _HAS_COZE_SDK else "Markdown (本地)",
+            "format": "Markdown (本地)",
             "title": safe_title,
             "download_url": url,
-            "note": "下载链接 24 小时内有效。" if _HAS_COZE_SDK else "Coze SDK 不可用，已保存为本地 Markdown 文件。"
+            "note": "已保存为本地 Markdown 文件。"
         }, ensure_ascii=False, indent=2)
 
     except Exception as e:
@@ -262,12 +239,12 @@ def generate_business_canvas_report(
 
         return json.dumps({
             "success": True,
-            "format": "PDF" if _HAS_COZE_SDK else "Markdown (本地)",
+            "format": "Markdown (本地)",
             "title": safe_title,
             "download_url": url,
             "fields_count": sum(1 for v in fields.values() if v != "未填写"),
             "total_fields": 9,
-            "note": "下载链接 24 小时内有效。" if _HAS_COZE_SDK else "Coze SDK 不可用，已保存为本地 Markdown 文件。"
+            "note": "已保存为本地 Markdown 文件。"
         }, ensure_ascii=False, indent=2)
 
     except json.JSONDecodeError:

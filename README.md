@@ -6,7 +6,7 @@
 
 ## 交付边界（重要）
 
-本仓**只交付 (A) 本地独立工作台**。Coze 平台服务 (B) 由平台侧保障，**非本仓交付物**，本地不装其重型依赖、也不测。
+本仓**只交付 (A) 本地独立工作台**。原 Coze 平台服务 (B) 已整体移除（源码 + 依赖 extra 同步清理），本仓与其零耦合。
 
 - **(A) 本地独立工作台（本仓交付）**：`web_server.py` 规则引擎 + Engine Steward。业务意图 0 次 LLM 调用；chitchat/闲聊走**已接入的 Engine Steward（只读、接地真实项目背景）**，不引入自由 agent，从设计上杜绝编造未出现的具体数字。含任务栏与会话持久化（本机 PostgreSQL）。前端为**方案二「分类对话工作台」**：5 个分类标签（全部/分析/改参/决策/对比）作过滤器、按分类分草稿、空项目自动灰化、右侧只读参数面板，CSS/JS 位于 `src/web_static/`。
 - **(B) Coze 平台服务（已从本仓移除）**：原 `src/main.py` LangGraph agent 循环及 `storage/*`（sqlalchemy/boto3/cozeloop 等）为 Coze 平台专用路径，2026-08-01 清理——本地 web_server 与其零耦合，也不再交付这些重型依赖。
@@ -154,20 +154,13 @@ make test          # 交付门禁：pytest 全量收集 tests/ 全部 33 个文�
 
 `pyproject.toml` 已按交付边界做依赖分组：
 
-- **主依赖（本地工作台 A 必需）**：FastAPI / uvicorn / pydantic / langchain / langchain-openai / langgraph / langsmith / rich 等轻量依赖，以及引擎自身的纯 Python 模块。
-- **`coze-platform` extra（Coze 平台服务 B 专属）**：boto3 / sqlalchemy / opencv / pptx / cozeloop 等重型平台库，本地不交付、不装也能跑 (A)。
+- **主依赖（本地工作台 A 必需）**：FastAPI / uvicorn / pydantic / langchain / langchain-openai / langgraph / langsmith / rich / openpyxl / psycopg 等轻量依赖，以及引擎自身的纯 Python 模块。原 `coze-platform` extra 已于 2026-09-27 整体移除（代码与依赖同步清理）。
 
 本地运行 (A) 只需：
 
 ```bash
-uv sync                # 默认只装主依赖（A 必需），不碰重型平台库
+uv sync                # 只装主依赖（A 必需）
 ./start.sh             # 启动本地服务
-```
-
-部署到 Coze 平台时再装全量：
-
-```bash
-uv sync --extra coze-platform
 ```
 
 > 注：`.venv` **不在版本库里**（`.gitignore` 忽略），新克隆必须跑一次 `bash setup.sh` 或 `uv sync` 生成，不能直接 `./start.sh`。

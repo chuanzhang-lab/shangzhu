@@ -127,7 +127,7 @@ def test_report_excel_routed_200():
     body = r.json()
     assert body["mode"] == "structured"
     assert body["intent"] == "report_excel"
-    # 本地无 Coze SDK 时会在 Markdown 内容里包含本地文件路径
+    # 本地生成路径会在 Markdown 内容里包含本地文件路径
     assert "报告已生成" in body["content"] or "file://" in body["content"]
 
 
@@ -182,3 +182,76 @@ def test_concurrent_chats_no_crash():
         results = list(ex.map(one, range(6)))
     assert all(r.status_code == 200 for r in results)
     assert all(r.json().get("mode") == "structured" for r in results)
+
+
+def test_structured_chat_does_not_auto_advise():
+    """/chat structured 立即返回规则结果，不附加 AI 解读，并给出 idle 按需入口。"""
+    r = _chat([{"role": "user",
+                "content": "奶茶店月租金1万员工2人工资各5000客单价15日售50杯"}],
+              tid="rb-no-auto-advise")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "structured"
+    assert "AI 解读" not in body["content"]
+    advice = body.get("ai_advice") or {}
+    assert advice.get("available") is True
+    assert advice.get("status") == "idle"
+    assert advice.get("analysis_id")
+    assert isinstance(advice.get("params_version"), int)
+
+
+def test_analysis_advice_success_timeout_and_stale():
+    """POST /analysis/advice：成功返回文本；超时标 timeout；参数变更后标 stale。"""
+    tid = "rb-advice"
+    r = _chat([{"role": "user",
+                "content": "奶茶店月租金1万员工2人工资各5000客单价15日售50杯"}],
+              tid=tid)
+    assert r.status_code == 200
+    meta = r.json()["ai_advice"]
+
+    saved = ws.llm_advise
+    try:
+        ws.llm_advise = lambda scan, user_text="", session_snapshot=None, context=None: {
+            "text": "本轮利润由引擎给出，解读只翻译数字。",
+            "ops": [],
+        }
+        ok = _client.post("/analysis/advice", json={
+            "thread_id": tid,
+            "analysis_id": meta["analysis_id"],
+            "params_version": meta["params_version"],
+        }, headers=_XHR)
+        assert ok.status_code == 200
+        ok_body = ok.json()
+        assert ok_body["status"] == "ok"
+        assert "利润" in ok_body["text"]
+
+        async def _timeout(*args, timeout=None, **kwargs):
+            return {"text": "", "ops": [], "_skipped": "timeout"}
+
+        saved_wait = ws._advise_with_timeout
+        try:
+            ws._advise_with_timeout = _timeout
+            timed = _client.post("/analysis/advice", json={
+                "thread_id": tid,
+                "analysis_id": meta["analysis_id"],
+                "params_version": meta["params_version"],
+            }, headers=_XHR)
+            assert timed.status_code == 200
+            assert timed.json()["status"] == "timeout"
+        finally:
+            ws._advise_with_timeout = saved_wait
+    finally:
+        ws.llm_advise = saved
+
+    r2 = _chat([{"role": "user",
+                 "content": "奶茶店月租金1.2万员工3人工资各5000客单价15日售50杯"}],
+               tid=tid)
+    assert r2.status_code == 200
+    stale = _client.post("/analysis/advice", json={
+        "thread_id": tid,
+        "analysis_id": meta["analysis_id"],
+        "params_version": meta["params_version"],
+    }, headers=_XHR)
+    assert stale.status_code == 200
+    assert stale.json()["status"] == "stale"
+    assert not stale.json().get("text")

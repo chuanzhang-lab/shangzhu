@@ -20,36 +20,9 @@ dependencies = [
     "python-dotenv>=1.2,<2",
     "openpyxl>=3.1,<4",
     "rich>=14,<15",
-]
-
-# ── Coze 平台服务 (B) 依赖（可选 extra）──
-# 本地不交付、由平台运行时保障，本地不装也能跑 (A)。
-# 部署到平台时：`uv sync --extra coze-platform`
-[project.optional-dependencies]
-coze-platform = [
-    "langgraph-checkpoint==3.0.0",
-    "langgraph-prebuilt==1.0.2",
-    "coze-coding-utils>=0.2.8,<1",
-    "coze-workload-identity>=0.1.4,<1",
-    "opencv-python>=4.12,<5",
-    "pandas>=2.2,<3",
-    "Pillow>=10.3,<11",
-    "cozeloop>=0.1.25,<1",
-    "alembic>=1.16,<2",
-    "SQLAlchemy>=2.0,<3",
-    "psycopg2-binary>=2.9,<3",
-    "boto3>=1.40,<2",
-    "langgraph-checkpoint-postgres>=3.0,<4",
-    "psycopg[binary]>=3.3,<4",
-    "psycopg-pool>=3.3,<4",
-    "pypdf>=6.4,<7",
-    "docx2python>=3.5,<4",
-    "python-pptx>=1.0,<2",
-    "coze-coding-dev-sdk>0.5.0,<1",
-    "PyGObject==3.48.2",
-    "dbus-python==1.3.2",
-    "pycairo==1.29.0",
-    "chardet>=5.2,<6",
+    "psycopg[binary]>=3.3,<4",          # PostgresStore 持久化首选（任务数据落盘本机 PG；
+                                        # 历史教训：放 extra 会被 uv sync 剪掉→静默降级丢数据，
+                                        # 护栏见 tests/test_persistence_guard.py）
 ]
 
 [tool.uv]

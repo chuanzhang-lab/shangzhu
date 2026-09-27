@@ -1,6 +1,6 @@
 """
 创业者工作台 — 本地 Web 启动入口
-独立 FastAPI 服务，避开 Coze 平台依赖
+独立 FastAPI 服务（本地工作台，仅引擎层 + Engine Steward）
 
 启动: ./.venv/bin/python web_server.py   （默认端口 8081）
 访问: http://localhost:8081
@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field
 # 路径设置
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(SCRIPT_DIR, "src")
-os.environ["COZE_WORKSPACE_PATH"] = SCRIPT_DIR
+os.environ["SHANGZHU_WORKSPACE_PATH"] = SCRIPT_DIR
 
 # 把 src 加入路径以支持相对导入
 if SRC_DIR not in __import__("sys").path:
@@ -189,8 +189,8 @@ logger = _setup_logging()
 # 服务启动时间，用于 health 接口展示运行时长
 _START_TIME = time.time()
 
-# Coze 自由 agent（build_agent）非本仓交付物：本地工作台只用引擎层 + Engine Steward，
-# 不引入 agents.agent 及其重型依赖（boto3/cozeloop/sqlalchemy 等）。
+# 自由 agent 栈已从本仓整体移除：本地工作台只用引擎层 + Engine Steward，
+# 不得引入自由 agent 及其重型平台依赖（boto3/sqlalchemy 等），护栏见 test_p48_*。
 
 # ─── 路由策略：意图 → 工具调用 ─────────────────────────────────────────────
 # 每个意图对应的工具调用方式
@@ -750,7 +750,7 @@ class TaskRename(BaseModel):
 # ─── FastAPI 应用 ──────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Web 服务启动：本地工作台模式（仅引擎层 + Engine Steward，不含 Coze agent）")
+    logger.info("Web 服务启动：本地工作台模式（仅引擎层 + Engine Steward）")
     yield
     # R3/R4 修复：服务关闭时释放资源（文件描述符 + 数据库连接）
     store = get_store()
@@ -1535,7 +1535,7 @@ async def chat(req: ChatRequest):
             })
 
         # ── 步骤 3: chitchat → 走 Engine Steward（只读、看清净背景当对话伙伴）──
-        # (B) Coze 自由 agent 非本仓交付物；本地工作台只用引擎管理者(llm_advisor)做解读，
+        # 本地工作台只用引擎管理者(llm_advisor)做解读，不引入自由 agent，
         # 不引入自由 agent，避免编造未在会话中出现的具体数字（如历史 bug「成都冒菜店/7.5万」）。
         # 审查修复 F4：锁内快照，不持有共享引用
         snapshot = get_biz_snapshot(tid)

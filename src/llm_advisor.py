@@ -27,10 +27,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
-# LLM 通道的合理上限：聊天 UI 单次调用不应阻塞过久（原 300s 过长）。
-# 配合 web_server 用 asyncio.to_thread 调用，即使触发超时也只挂起该请求，
-# 不会冻结整个事件循环。
-_LLM_TIMEOUT = 60
+# HTTP 客户端上限：配置 timeout 不得超过此值（防 300s 拖垮并发）。
+# 各入口由 web_server wait_for 分层：闲聊 steward 8s，顾问/按需解读 30s。
+_LLM_TIMEOUT = 45
 _llm_cache_lock = threading.Lock()
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # 默认值，实际优先从 config 读取
@@ -99,14 +98,14 @@ def _api_key() -> str:
 
     return ""
 
-# 配置路径自愈：优先 COZE_WORKSPACE_PATH，其次本文件上两级仓库根，
+# 配置路径自愈：优先 SHANGZHU_WORKSPACE_PATH，其次本文件上两级仓库根，
 # 最后 cwd。不依赖 web_server 是否先设环境变量，import 即用。
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _resolve_llm_config_path() -> str:
     candidates = []
-    env_ws = os.getenv("COZE_WORKSPACE_PATH", "").strip()
+    env_ws = os.getenv("SHANGZHU_WORKSPACE_PATH", "").strip()
     if env_ws:
         candidates.append(Path(env_ws) / "config" / "agent_llm_config.json")
     candidates.append(_REPO_ROOT / "config" / "agent_llm_config.json")
@@ -204,7 +203,7 @@ def _is_decision_scan(scan: dict) -> bool:
 
 
 def _load_llm_config() -> dict:
-    # 每次解析路径，支持运行期切换 COZE_WORKSPACE_PATH / 工作目录
+    # 每次解析路径，支持运行期切换 SHANGZHU_WORKSPACE_PATH / 工作目录
     path = _resolve_llm_config_path()
     try:
         with open(path, "r", encoding="utf-8") as f:

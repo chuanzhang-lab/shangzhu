@@ -15,7 +15,7 @@
 
 **软删**：`delete_task` 只置 `deleted_at`（归档），不物理删除消息。
 
-**历史教训（2026-08-30）**：psycopg 一度只声明在 `coze-platform` extra 里，
+**历史教训（2026-08-30，2026-09-27 二次确认）**：psycopg 一度只声明在可选依赖组（旧 extra）里，
 `uv sync` 把它从 .venv 剪掉 → `import psycopg` 失败 → 静默降级内存 store →
 任务栏数据重启即丢，且降级日志没落盘（用的是模块 logger，没挂 handler），
 排查时日志里一行痕迹都没有。现改为：

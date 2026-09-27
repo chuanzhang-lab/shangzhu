@@ -14,9 +14,10 @@
     另含本地存储层（local_store 内存/PG store）与任务 CRUD API（test_local_store /
     test_task_api）。
 
-    不覆盖【Coze 平台服务(B) = src/main.py + agents 栈 + storage/s3 + 报告/调研工具】——
-    该路径由平台侧保障、依赖平台运行时(重型栈)，本仓不交付也不测。
-    相关解耦由 test_phase4_workbench.test_p48_* 硬性守护（web_server 不得 import agents.agent）。
+    不覆盖【平台侧路径：原 Coze 平台服务(B) 的 src/main.py + agents 栈 + storage/s3
+    + 报告/调研工具】——该路径已于 2026-08/09 从本仓整体移除（含依赖 extra），
+    报告/调研工具保留接口、本地降级返回。
+    解耦由 test_phase4_workbench.test_p48_* 硬性守护（web_server 不得 import agents.agent）。
 
     Cleanup 测试（test_cleanup）是例外：仅做技术债清理的回归守护（如
     project_manager 解析器去重），用隔离子进程 stub langchain.tools 验证，
