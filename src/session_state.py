@@ -191,9 +191,17 @@ def merge_params(old: dict, new: dict) -> dict:
     for k, v in (new or {}).items():
         if v is not None:
             merged[k] = v
-    rate = merged.get("variable_cost_rate")
+    # F1 修复（2026-09-27）：只认「本轮新输入」带来的 rate，绝不用历史残留的旧 rate
+    # 反推 ratio。旧实现读 merged.get("variable_cost_rate")，一旦会话里残留旧 rate=35，
+    # 「变动成本率改为60」（只带 ratio、不带 rate）也会被 rate/100=0.35 覆盖回退，
+    # 表现为改参跳回旧值 + 前端误报「未采纳」。
+    rate = (new or {}).get("variable_cost_rate")
     if isinstance(rate, (int, float)) and 0 < rate < 100:
         merged["variable_cost_ratio"] = round(rate / 100, 4)
+    elif "variable_cost_ratio" in (new or {}) and (new or {}).get("variable_cost_ratio") is not None:
+        # 本轮明确给了 ratio：清掉可能残留的旧 rate，避免它在持久化里继续传染、
+        # 并污染 LLM 接地上下文（_fmt_value 会把 rate=35 显示成 3500%）。
+        merged.pop("variable_cost_rate", None)
     return merged
 
 

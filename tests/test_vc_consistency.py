@@ -56,6 +56,22 @@ def test_merge_syncs_ratio_from_rate():
     assert merged["variable_cost_ratio"] == 0.6
 
 
+def test_merge_does_not_let_stale_rate_clobber_new_ratio():
+    """回归（2026-09-27）：old 残留 rate，new 只带 ratio → ratio 必须取新值。
+
+    现场：会话历史残留 variable_cost_rate（「变动成本35」无%写法、或旧数据落盘
+    未清），用户改「变动成本率改为60」只产出 ratio=0.6。旧实现读
+    merged.get("variable_cost_rate")，把新 ratio 打回 rate/100，导致改参跳回
+    旧值 + 前端误报「未采纳」。修复后：只认本轮 rate，且明确给 ratio 时清掉残留 rate。
+    """
+    old = {"variable_cost_ratio": 0.35, "variable_cost_rate": 35.0}
+    new = {"variable_cost_ratio": 0.6}
+    merged = merge_params(old, new)
+    assert merged["variable_cost_ratio"] == 0.6
+    # 加固：本轮明确给了 ratio，残留旧 rate 应被清掉，不再传染持久化
+    assert merged.get("variable_cost_rate") is None
+
+
 def test_full_pipeline_vc_updated_to_60():
     """T1(40%) 合并 T2(改为60%) → quick_scan 用 60% 算（缺陷 1 主证据）。"""
     t1 = extract_params("我开咖啡店，月租金15000，日均客流50，客单价25，员工3人，人均工资5000，变动成本率40%")
