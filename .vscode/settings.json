@@ -1,0 +1,9 @@
+{
+	// Pylance 静态分析补充路径。
+	// web_server.py 运行时通过 sys.path.insert(0, src) 导入 router/tools/session_state
+	// 等 src/ 下的模块；pytest 走 pyproject.toml 的 [tool.pytest.ini_options]
+	// pythonpath=["src"]。编辑器不知道这两个运行时技巧，需要 extraPaths
+	// 才能解析这些导入（否则 Pylance 报 25 条"无法解析导入"Hint）。
+	// 仅影响编辑器静态分析，不影响运行时行为。
+	"python.analysis.extraPaths": ["./src"]
+}
