@@ -35,6 +35,15 @@
   .act-btn:hover { background: #e8e8ea; }
   .act-btn.apply { background: #2563eb; color: #fff; border-color: #2563eb; }
   .act-btn.apply:hover { background: #1d4ed8; }
+  .act-btn.advice-btn { background: #fff7ed; color: #9A5F2E; border-color: #B87333; }
+  .act-btn.advice-btn:hover:not(:disabled) { background: #ffedd5; }
+  .act-btn.advice-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .ai-advice-wrap { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #eee; }
+  .ai-advice-status { margin-top: 8px; font-size: 13px; line-height: 1.6; color: #555; }
+  .ai-advice-status.loading { color: #9A5F2E; }
+  .ai-advice-status.timeout, .ai-advice-status.error { color: #b91c1c; }
+  .ai-advice-status.stale { color: #d97706; }
+  .ai-advice-text, .ai-advice-ops { margin-top: 6px; }
   /* 分类条 */
   #cat-bar { display: flex; gap: 4px; padding: 8px 16px; background: #fafafa; border-top: 1px solid #eee; overflow-x: auto; align-items: center; }
   .cat-btn { white-space: nowrap; background: #fff; border: 1px solid #d4d4d8; border-radius: 16px; padding: 5px 14px; font-size: 13px; cursor: pointer; color: #555; transition: all 0.15s; position: relative; flex-shrink: 0; }

@@ -243,9 +243,15 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         raw_params.get("total_investment"),
         "[用户]" if raw_params.get("total_investment") is not None else "[缺失] 未提供")
 
+    if raw_params.get("monthly_rent") is None:
+        _rent_src = "[缺失] 未提供"
+    elif raw_params.get("_rent_from_annual"):
+        _rent_src = "[推算] 年租金/12"
+    else:
+        _rent_src = "[用户]"
     p["monthly_rent"] = _set("monthly_rent",
         raw_params.get("monthly_rent"),
-        "[用户]" if raw_params.get("monthly_rent") is not None else "[缺失] 未提供")
+        _rent_src)
 
     p["daily_traffic"] = _set("daily_traffic",
         raw_params.get("daily_traffic"),
@@ -954,8 +960,10 @@ def _project_trend_12m(params: dict) -> dict:
 
 
 def _safe_runway(params: dict):
-    """可用现金缺失时返回 '未知'，否则返回跑道月数（避免 None 参与除法崩溃）。"""
+    """可用现金或变动成本缺失时返回 '未知'，否则返回跑道月数（避免 None 参与除法崩溃）。"""
     if params.get("available_cash") is None:
+        return "未知"
+    if params.get("variable_cost_ratio") is None and params.get("monthly_variable_cost") is None:
         return "未知"
     burn = (params["monthly_fixed_cost"] or 0) + (params.get("monthly_variable_cost") or 0)
     rev = params["monthly_revenue"]
@@ -1068,8 +1076,10 @@ def _recompute_outputs(params: dict):
 
 
 def _runway_numeric(params: dict):
-    """返回跑道月数（数值）或 None（现金缺失）。区别于 _safe_runway 的 '未知' 字符串。"""
+    """返回跑道月数（数值）或 None（现金/变动成本缺失）。区别于 _safe_runway 的 '未知' 字符串。"""
     if params.get("available_cash") is None:
+        return None
+    if params.get("variable_cost_ratio") is None and params.get("monthly_variable_cost") is None:
         return None
     burn = (params["monthly_fixed_cost"] or 0) + (params.get("monthly_variable_cost") or 0)
     rev = params["monthly_revenue"]
@@ -1262,10 +1272,14 @@ def quick_scan(params_json: str) -> str:
         _rev_for_calc = params["monthly_revenue"]
         if isinstance(_rev_for_calc, (list, tuple)):
             _rev_for_calc = _rev_for_calc[0] if _rev_for_calc else 0
-        monthly_var_cost = params.get("monthly_variable_cost") or 0
+        monthly_var_cost = params.get("monthly_variable_cost")
+        vcr_missing = params.get("variable_cost_ratio") is None and monthly_var_cost is None
         fixed_cost = params.get("monthly_fixed_cost")
-        if params["available_cash"] is not None and fixed_cost is not None:
-            burn = fixed_cost + monthly_var_cost
+        if vcr_missing:
+            # 缺失不当 0：变动成本未知时跑道/现金与利润同一套「未知」
+            rw = {"runway_months": None, "note": "变动成本率未提供，跑道无法计算"}
+        elif params["available_cash"] is not None and fixed_cost is not None:
+            burn = fixed_cost + (monthly_var_cost or 0)
             rw = _calc_runway(params["available_cash"], burn, _rev_for_calc)
         elif params["available_cash"] is None:
             rw = {"runway_months": None, "note": "总投资未提供，跑道无法计算"}
@@ -1312,8 +1326,10 @@ def quick_scan(params_json: str) -> str:
             profit_status = "⚪ 未知（需变动成本率）"
         else:
             profit_status = "🟢 盈利" if params["monthly_profit"] > 0 else "🔴 亏损"
-        rw_months = rw.get("runway_months", "无限")
-        if rw_months is None:
+        rw_months = rw.get("runway_months")
+        if vcr_missing:
+            cash_status = "⚪ 未知（需变动成本率）"
+        elif rw_months is None:
             cash_status = "⚪ 未知（需总投资）"
         elif isinstance(rw_months, (int, float)):
             if rw_months < 0:
@@ -1324,8 +1340,10 @@ def quick_scan(params_json: str) -> str:
                 cash_status = "🟡 偏紧"
             else:
                 cash_status = "🟢 安全"
-        else:
+        elif rw_months == "无限":
             cash_status = "🟢 正向现金流"
+        else:
+            cash_status = "⚪ 未知"
 
         if daily_be is not None and params["daily_traffic"] is not None:
             be_status = "🔴 客流不足" if params["daily_traffic"] < daily_be else "🟢 可达保本"

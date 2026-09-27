@@ -258,6 +258,7 @@ def apply_turn(thread_id: str, new_params: dict, new_raw: str = "",
         if new_raw:
             st["raw_text"] = _truncate_raw((st["raw_text"] + " " + new_raw).strip())
         st["turn"] += 1
+        st["_version"] = st.get("_version", 0) + 1
         return st
 
 
@@ -369,6 +370,32 @@ def set_pending_ops(thread_id: str, ops: list) -> None:
     with _LOCK:
         if thread_id in _SESSIONS:
             _SESSIONS[thread_id]["_pending_ops"] = ops
+
+
+def get_params_version(thread_id: str) -> int:
+    """锁内读取写入版本号，供按需解读做 stale 校验。"""
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        return int(st.get("_version", 0)) if st else 0
+
+
+def set_last_analysis(thread_id: str, payload: dict) -> None:
+    """保存本轮结构化分析快照，供 POST /analysis/advice 按需解读。"""
+    import copy
+    with _LOCK:
+        st = get_state(thread_id)
+        st["_last_analysis"] = copy.deepcopy(payload or {})
+
+
+def get_last_analysis(thread_id: str) -> Optional[dict]:
+    """读取本轮分析快照（深拷贝）；无则 None。"""
+    import copy
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        if not st:
+            return None
+        snap = st.get("_last_analysis")
+        return copy.deepcopy(snap) if snap else None
 
 # ── 主持人模式计数器（锁内读-改-写，审查修复 F4）───────────────────────
 # 原实现在 web_server 锁外直接 st["_advise_meta"][field] += 1，并发轮次会丢计数。

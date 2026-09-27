@@ -178,10 +178,13 @@ def _fmt_scan(data: Dict) -> str:
         lines.append(f"| 毛利率 | {gross_margin}% | — |")
 
     runway = core.get("runway_months")
-    if runway is not None and runway != "无限":
-        lines.append(f"| 跑道 | {runway} 月 | — |")
+    cash_status = status.get("cash", "")
+    if "变动成本" in str(cash_status):
+        lines.append(f"| 跑道 | 未知（需变动成本率） | {cash_status} |")
+    elif runway is not None and runway != "无限":
+        lines.append(f"| 跑道 | {runway} 月 | {cash_status or '—'} |")
     elif runway is None:
-        lines.append(f"| 跑道 | 未知（需总投资） | — |")
+        lines.append(f"| 跑道 | 未知（需总投资） | {cash_status or '—'} |")
 
     lines.append("")
 

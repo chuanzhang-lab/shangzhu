@@ -484,11 +484,14 @@ def test_p46_full_replay_invariants():
         assert d["param_sources"]["monthly_revenue"].startswith("[用户]"), k
         # 薪资恒定
         assert d["params"]["avg_salary"] == 4000, (k, d["params"]["avg_salary"])
-        # 现金不缺失（总投资已给 → available_cash 存在 → 跑道绝不 None）
+        # 现金不缺失（总投资已给 → available_cash 存在）。
+        # 变动成本率缺失时跑道必须是未知，不得把变动成本当 0 算出「无限」。
         rw = d["core_metrics"]["runway_months"]
-        assert rw is not None, (k, "跑道缺失(cash缺失bug)")
+        if d["core_metrics"]["monthly_profit"] is None:
+            assert rw is None or rw == "未知", (k, rw, "缺变动成本率时跑道应未知")
+        else:
+            assert rw is not None, (k, "跑道缺失(cash缺失bug)")
         # 亏损时跑道必须有限（修旧"无限"假象）：仅盈利(net_burn<=0)才"无限"
-        # D2：变动成本率缺失时利润为 None（不能下结论），跳过符号断言
         if d["core_metrics"]["monthly_profit"] is not None and d["core_metrics"]["monthly_profit"] < 0:
             assert rw != "无限", (k, rw)
         # 不误抓 1.0

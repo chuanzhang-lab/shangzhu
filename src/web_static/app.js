@@ -912,6 +912,73 @@ function addActionButtons(el, content) {
   el.appendChild(actionsDiv);
 }
 
+function addAdviceButton(el, adviceMeta, tid) {
+  if (!el || !adviceMeta) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'ai-advice-wrap';
+  const btn = document.createElement('button');
+  btn.className = 'act-btn advice-btn';
+  btn.textContent = '生成 AI 解读';
+  const statusEl = document.createElement('div');
+  statusEl.className = 'ai-advice-status';
+  wrap.appendChild(btn);
+  wrap.appendChild(statusEl);
+  el.appendChild(wrap);
+
+  const setStatus = (html, cls) => {
+    statusEl.className = 'ai-advice-status' + (cls ? ' ' + cls : '');
+    statusEl.innerHTML = html || '';
+  };
+
+  const runAdvice = () => {
+    btn.disabled = true;
+    btn.textContent = '解读中…';
+    setStatus('正在生成解读，大约需要十几秒', 'loading');
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort(), 45000);
+    fetch('/analysis/advice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({
+        task_id: tid,
+        thread_id: tid,
+        analysis_id: adviceMeta.analysis_id,
+        params_version: adviceMeta.params_version,
+      }),
+      signal: ctrl.signal,
+    }).then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d }))).then(({ d }) => {
+      const st = (d && d.status) || 'error';
+      if (st === 'ok' || (st === 'empty' && (d.text || d.ops_block))) {
+        let html = '';
+        if (d.text) html += '<div class="ai-advice-text">' + renderMarkdown('💡 **AI 解读**\n\n' + d.text) + '</div>';
+        if (d.ops_block) html += '<div class="ai-advice-ops">' + renderMarkdown(d.ops_block) + '</div>';
+        if (!html) html = '<em>暂无解读内容</em>';
+        setStatus(html, 'ok');
+        btn.textContent = '已生成';
+        if (d.ops_block) addActionButtons(el, d.ops_block);
+        if (d.ops && d.ops.length) opsAvailable = true;
+        updateBadges();
+        return;
+      }
+      if (st === 'stale') {
+        setStatus(escape(d.reason || '参数已更新，请对最新结果重新生成解读'), 'stale');
+        btn.textContent = '已过期';
+        btn.disabled = true;
+        return;
+      }
+      setStatus(escape(d.reason || '解读失败，可重试'), st === 'timeout' ? 'timeout' : 'error');
+      btn.disabled = false;
+      btn.textContent = '重试';
+    }).catch(e => {
+      const isTimeout = e && e.name === 'AbortError';
+      setStatus(isTimeout ? '解读超时，可重试' : '网络错误，可重试', isTimeout ? 'timeout' : 'error');
+      btn.disabled = false;
+      btn.textContent = '重试';
+    }).finally(() => { clearTimeout(timeoutId); });
+  };
+  btn.addEventListener('click', runAdvice);
+}
+
 // ════════════════════════════════════════════════
 // send() — 核心发送逻辑（重构，使用新辅助函数）
 // ════════════════════════════════════════════════
@@ -959,6 +1026,11 @@ async function send() {
     // ── 应用 A/B 按钮（使用 addActionButtons 辅助函数）──
     if (data.ops_available) {
       addActionButtons(placeholder, data.content);
+    }
+
+    // ── 按需 AI 解读（structured 先出规则结果，点击才触发 LLM）──
+    if (data.ai_advice && data.ai_advice.available) {
+      addAdviceButton(placeholder, data.ai_advice, data.thread_id || currentTaskId);
     }
 
     // ── 参数面板更新 ──

@@ -23,7 +23,8 @@ def test_extract_vc_without_rate_word_gives_ratio():
     """『变动成本改为60%』不带『率』字，也应产出归一化 ratio=0.6。"""
     d = extract_params("把变动成本改为60%，你再算下它的盈亏")
     assert d.get("variable_cost_ratio") == 0.6
-    assert d.get("variable_cost_rate") == 60.0
+    # 精确 ratio 已抽出时，通用 rate 去噪丢弃，避免双字段污染引擎
+    assert d.get("variable_cost_rate") is None
 
 
 def test_extract_vc_variants_all_normalized():

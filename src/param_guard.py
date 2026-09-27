@@ -97,6 +97,8 @@ FIELD_CONSTRAINTS = {
         "type": (int, float), "min": 0.01, "max": 10_000_000,
         "soft_min": 0.1, "soft_max": 100_000,
         "unit_hint": "元",
+        # 餐饮/零售客单价软上限：串台到几十万必须待确认并剔除
+        "industry_soft_max": {"餐饮": 1000, "零售": 5000, "电商": 5000},
     },
     "daily_traffic": {
         "type": (int, float), "min": 0, "max": 1_000_000,
@@ -206,7 +208,7 @@ def normalize_value(field: str, value: Any) -> Tuple[Any, Optional[str]]:
 
 # ── 单字段校验 ────────────────────────────────────────────────────────────
 
-def validate_field(field: str, value: Any) -> Dict[str, Any]:
+def validate_field(field: str, value: Any, industry: Optional[str] = None) -> Dict[str, Any]:
     """校验单个字段值。
 
     返回 {
@@ -278,6 +280,20 @@ def validate_field(field: str, value: Any) -> Dict[str, Any]:
         result["needs_confirmation"] = True
         return result
 
+    # 行业软上限（餐饮客单价 30 万）：升级为待确认并剔除，与负租金同一策略
+    industry_caps = spec.get("industry_soft_max") or {}
+    cap = industry_caps.get(industry) if industry else None
+    if cap is not None and v > cap:
+        result.update(
+            level=LEVEL_CRITICAL,
+            message=(
+                f"{field}={v:g} 超出{industry}常见上限 {cap:g}（{unit}），"
+                f"疑似抽取串台 → 已拦截，不进入计算"
+            ),
+            needs_confirmation=True,
+        )
+        return result
+
     # 软边界：超出常识但可能合法 → WARNING
     if v < soft_min or v > soft_max:
         result.update(
@@ -323,7 +339,7 @@ def validate_params(
             })
 
         # 2) 单字段校验
-        check = validate_field(field, value)
+        check = validate_field(field, value, industry=industry)
         if check["level"] != LEVEL_OK:
             issues.append(check)
             if check["level"] == LEVEL_CRITICAL:

@@ -63,6 +63,14 @@ def _chat(text, tid):
     return _client.post("/chat", json={"messages":[{"role":"user","content":text}], "thread_id": tid}, headers={"X-Requested-With": "XMLHttpRequest"}).json()
 
 
+def _advice(tid, meta=None):
+    body = {"thread_id": tid}
+    if meta:
+        body["analysis_id"] = meta.get("analysis_id")
+        body["params_version"] = meta.get("params_version")
+    return _client.post("/analysis/advice", json=body, headers={"X-Requested-With": "XMLHttpRequest"}).json()
+
+
 def _scan_d(d):
     return json.loads(quick_scan.invoke({"params_json": json.dumps(d, ensure_ascii=False)}))
 
@@ -106,29 +114,35 @@ def test_t1_llm_view_has_no_raw_text():
 # ── T2: 模糊目标 → LLM 输出 ops，op_executor 校验 + 预览 + 用户「应用」生效 ──
 
 def test_t2_fuzzy_goal_emits_ops():
-    """模糊目标『怎么不亏』→ LLM 输出 ops，渲染为「方案A/B→月利润Y，回『应用A』生效」。"""
+    """模糊目标『怎么不亏』→ /chat 先出规则结果；按需解读才输出方案A/B。"""
     _ensure_stub()
     tid = "real-t2"
     reset_state(tid)
     _chat("开羊肉汤店，月租金1200，日售50杯，单价15，变动成本率60%，人工2*3000", tid)
     r = _chat("怎么不亏", tid)
-    content = r["content"]
+    assert r["mode"] == "structured"
+    assert "AI 解读" not in r["content"]
+    meta = r.get("ai_advice") or {}
+    assert meta.get("status") == "idle"
+    advice = _advice(tid, meta)
+    assert advice.get("status") == "ok", advice
+    content = (advice.get("text") or "") + "\n" + (advice.get("ops_block") or "")
     assert "方案A" in content and "方案B" in content, content[:500]
     assert "应用A" in content and "应用B" in content
     assert "月利润" in content
-    # 应被挂到 session 等用户确认
     st = get_state(tid)
     assert "_pending_ops" in st and len(st["_pending_ops"]) == 2
 
 
 def test_t2_apply_command_executes():
-    """用户回『应用A』→ op_executor 校验 + apply_op 写入 + 重算。"""
+    """按需解读给出方案后，用户回『应用A』→ op_executor 校验 + apply_op 写入 + 重算。"""
     _ensure_stub()
     _ensure_stub()
     tid = "real-t2-apply"
     reset_state(tid)
     _chat("开羊肉汤店，月租金1200，日售50杯，单价15，变动成本率60%，人工2*3000", tid)
-    _chat("怎么不亏", tid)
+    r = _chat("怎么不亏", tid)
+    _advice(tid, r.get("ai_advice"))
     r3 = _chat("应用A", tid)
     assert r3["mode"] == "apply", r3
     params = r3["params"]
@@ -199,7 +213,8 @@ def test_t4_pending_ops_consumed_after_apply():
     tid = "real-t4"
     reset_state(tid)
     _chat("开羊肉汤店，月租金1200，日售50杯，单价15，变动成本率60%，人工2*3000", tid)
-    _chat("怎么不亏", tid)
+    r = _chat("怎么不亏", tid)
+    _advice(tid, r.get("ai_advice"))
     assert "_pending_ops" in get_state(tid)
     _chat("应用A", tid)
     assert "_pending_ops" not in get_state(tid) or not get_state(tid)["_pending_ops"]

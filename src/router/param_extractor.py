@@ -264,6 +264,9 @@ _FIELD_PATTERNS = [
         "keywords": ["月租", "月租金", "租金", "房租", "铺租"],
         "position": "before",  # 默认关键词在数字前
         "units": ["元", "块", "万", "千"],
+        # 「押金3个月」的 3 带「月」，不是租金金额
+        "reject_units": ["月"],
+        "reject_context": ["押金"],
         # 个别关键词的位置覆盖（关键词 → 位置）
         "kw_position": {},  # 全部默认 before
     },
@@ -335,16 +338,23 @@ _FIELD_PATTERNS = [
         "field": "price_per_unit",
         "keywords": [
             "客单价", "单价", "均价", "售价",
-            "一杯", "元一杯", "块一杯",
+            "一杯", "一碗", "一份", "一单",
+            "元一杯", "块一杯", "元一碗", "块一碗",
         ],
-        "position": "after",  # 默认数字在关键词前
+        "position": "after",  # 默认数字在关键词前（18元一杯）
         "units": ["元", "块"],
+        # 「一碗牛肉面成本6元」是成本不是售价
+        "reject_context": ["成本"],
         "kw_position": {
-            # "每杯15元" 数字在关键词后
+            # "每杯15元" / "一杯25" 数字在关键词后
             "单价": "before",
             "客单价": "before",
             "均价": "before",
             "售价": "before",
+            "一杯": "before",
+            "一碗": "before",
+            "一份": "before",
+            "一单": "before",
         },
     },
     {
@@ -425,6 +435,8 @@ _FIELD_PATTERNS = [
         "keywords": ["提成", "佣金", "抽成"],
         "position": "before",
         "units": ["元", "块", "万", "千"],
+        # 「美团抽成20%」是扣点比例，不是 20 元/月
+        "reject_units": ["%", "百分之"],
         "kw_position": {},
     },
     {
@@ -439,6 +451,38 @@ _FIELD_PATTERNS = [
 
 # ─── 文本分段 ─────────────────────────────────────────────────────────────
 # 按中文/英文逗号分号句号切分，每段独立提取
+
+# 无标点连写时，在字段关键词前插入分隔，避免「投资30万租金8000」整段共享第一个「万」
+_BOUNDARY_RE = re.compile(
+    r"(总投资|总投入|启动资金|前期投入|变动成本率|可变成本率|"
+    r"食材成本|原料成本|材料成本|月租金|年租金|客单价|人均月薪|"
+    r"一天大概|每天大概|一天能|每天能|"
+    r"月租|年租|投资|投入|租金|房租|"
+    r"工资|薪资|月薪|人工|"
+    r"食材|原料|"
+    # 「一杯25」要切开；「18元一碗」量词在金额后、后面无数字，不能切
+    r"(?:一杯|一碗|一份|一单)(?=\s*\d)|"
+    # 只切中文人数（租金8000两个人）。勿切「2个员工」「100人次」
+    r"[两一二三四五六七八九十]+个?人)"
+)
+_KW_WINDOW = 24  # 关键词邻域：禁止用整段 after_text 的第一个「万」
+
+
+def _inject_field_boundaries(text: str) -> str:
+    """在字段关键词前插入逗号，把无标点连写切成可独立抽取的段。"""
+    if not text:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        if m.start() == 0:
+            return m.group(0)
+        prev = text[m.start() - 1]
+        if prev in "，。；,;、 \t":
+            return m.group(0)
+        return "，" + m.group(0)
+
+    return _BOUNDARY_RE.sub(_repl, text)
+
 
 def _split_segments(text: str) -> List[str]:
     """按分隔符切分文本（保留空格）"""
@@ -483,8 +527,8 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
         # 取该关键词的位置
         position = kw_position.get(kw, default_position)
 
-        before_text = segment[:idx]
-        after_text = segment[idx + len(kw):]
+        before_text = segment[:idx][-_KW_WINDOW:]
+        after_text = segment[idx + len(kw):][:_KW_WINDOW]
 
         # 确定搜索「侧」的顺序（before/after），按 position 决定
         if not before_text and after_text:
@@ -503,6 +547,10 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
         # 误当成「人数」——先找带「人/个」单位的数字，找不到再兜底。
         if units:
             for s in sides:
+                if reject_context and _has_context_word(s, reject_context):
+                    continue
+                if reject_units and _has_number_with_unit(s, reject_units):
+                    continue
                 value = _find_number(s, units, unit_only=True)
                 # F8：超限视为误抓，继续找下一个候选（见 max_value 注释）
                 if value is not None and (max_value is None or value <= max_value):
@@ -518,6 +566,11 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
                 continue
             value = _find_number(s, units, strict=strict)
             if value is not None:
+                # 「3个月」不是金额：数字与「月」之间可夹「个」
+                if reject_units and "月" in reject_units:
+                    vn = int(value) if float(value).is_integer() else None
+                    if vn is not None and re.search(rf"{vn}\s*个?月", s):
+                        continue
                 return value
 
     return None
@@ -619,8 +672,8 @@ def _find_number(text: str, units, strict: bool = False,
                 val = _parse_number(m.group(1))
                 if val is not None:
                     return -val if negative else val
-            # 单位 + 数字
-            m = re.search(rf"({u}\s*(?:{_SIGN})?\d+(?:\.\d+)?)", text)
+            # 单位 + 数字（「一杯25」的「杯」前是「一」，不是客流单位）
+            m = re.search(rf"((?<![一每]){u}\s*(?:{_SIGN})?\d+(?:\.\d+)?)", text)
             if m:
                 val = _parse_number(m.group(1))
                 if val is not None:
@@ -742,6 +795,9 @@ def _extract_cost_ratio(text: str, params: dict) -> None:
         return
     pats = [
         # E1 修复（2026-09-12）：对象词「营业额/营收/收入」改为**可省略**——
+        # 「食材大概35% / 食材成本35% / 原料成本大概 40%」——口语不等于术语
+        r"(?<!固定)(?<!总)(?:食材|原料|材料)(?:成本)?\s*"
+        r"(?:占|为|是|到)?\s*(?:大概|大约|约)?\s*(-?\d+(?:\.\d+)?)\s*%",
         # 「食材成本占40%」是口语里最自然的说法，旧实现要求显式对象词而漏抽。
         # 负向断言排除「固定成本占…」「总成本占…」：那是**固定成本占比**，
         # 不是变动成本率（不能把「月固定成本占40%」算成 vcr=0.4）。
@@ -999,6 +1055,87 @@ def _extract_role_salary(text: str, params: dict) -> None:
         params["avg_salary"] = sum(found) / len(found)
 
 
+_LABOR_TOTAL_MARK = r"(?:一共|合计|加起来|总共|共计)"
+_HEADCOUNT_RE = re.compile(
+    r"(?<![每万])([两一二三四五六七八九十]|[0-9]{1,3})\s*个?人(?!均|次)"
+)
+
+
+def _extract_headcount(text: str, params: dict) -> None:
+    """「两个人 / 2个人」→ employee_count。不把「每人 / 万人」当人数。"""
+    if params.get("employee_count") is not None:
+        return
+    m = _HEADCOUNT_RE.search(text or "")
+    if not m:
+        return
+    raw = m.group(1)
+    n = float(raw) if raw.isdigit() else _parse_cn_number(raw)
+    if n is not None and 0 <= n <= 200:
+        params["employee_count"] = float(n)
+
+
+def _extract_labor_total(text: str, params: dict) -> None:
+    """「两个人工资一共1万2」是总额，人均 = 总额 / 人数。
+
+    avg_salary 仍是人均。没有人数时宁缺勿填，避免把总额当人均。
+    """
+    if not text or not re.search(_LABOR_TOTAL_MARK, text):
+        return
+    if params.get("employee_count") is None:
+        _extract_headcount(text, params)
+
+    m = re.search(
+        r"(?:工资|薪资|月薪|人工).{0,16}" + _LABOR_TOTAL_MARK + r"\s*"
+        r"([0-9一二两三四五六七八九十]+(?:\.\d+)?\s*[万千]?[0-9一二两三四五六七八九十]?)",
+        text,
+    )
+    if not m:
+        m = re.search(
+            r"([两一二三四五六七八九十\d]+)\s*个?人.{0,16}" + _LABOR_TOTAL_MARK + r"\s*"
+            r"([0-9一二两三四五六七八九十]+(?:\.\d+)?\s*[万千]?[0-9一二两三四五六七八九十]?)",
+            text,
+        )
+        total_raw = m.group(2) if m else None
+    else:
+        total_raw = m.group(1)
+    if not total_raw:
+        return
+    total = _parse_number(total_raw.strip())
+    if total is None or total < 500:
+        return
+    count = params.get("employee_count")
+    if isinstance(count, (int, float)) and count > 0:
+        params["avg_salary"] = round(float(total) / float(count), 2)
+    else:
+        params.pop("avg_salary", None)
+
+
+def _extract_annual_rent(text: str, params: dict) -> None:
+    """年租金 → 月租 = 年额/12。不把年额当月租。"""
+    if not text:
+        return
+    pats = (
+        r"(?:年租金|年租)\s*"
+        r"((?:-?\d+(?:\.\d+)?|[一二两三四五六七八九十]+)(?:\s*[万千])?)",
+        r"(?:房租|租金)[^，。；0-9一二两三四五六七八九十]{0,6}一年\s*"
+        r"((?:-?\d+(?:\.\d+)?|[一二两三四五六七八九十]+)(?:\s*[万千])?)",
+        r"一年(?:的)?(?:房租|租金)\s*"
+        r"((?:-?\d+(?:\.\d+)?|[一二两三四五六七八九十]+)(?:\s*[万千])?)",
+    )
+    annual = None
+    for pat in pats:
+        m = re.search(pat, text)
+        if not m:
+            continue
+        annual = _parse_number(m.group(1).strip())
+        if annual:
+            break
+    if not annual or annual <= 0:
+        return
+    params["monthly_rent"] = round(annual / 12.0, 2)
+    params["_rent_from_annual"] = True
+
+
 def extract_params(text: str) -> Dict:
     """
     从自然语言提取项目参数。
@@ -1006,6 +1143,8 @@ def extract_params(text: str) -> Dict:
     """
     params: Dict = {}
     text = text.strip()
+    # 无标点连写先切段，避免「投资30万租金8000」共享第一个「万」
+    text = _inject_field_boundaries(text)
 
     # 行业
     industry = _detect_industry(text)
@@ -1055,12 +1194,18 @@ def extract_params(text: str) -> Dict:
     #    （如「日售50杯变动成本率55%」→ 50），而精确的 variable_cost_ratio
     #    已由 _extract_cost_ratio 给出 0.55 → 丢弃这份通用噪声，避免污染引擎。 ──
     if params.get("variable_cost_rate") is not None and params.get("variable_cost_ratio") is not None:
-        diff = params["variable_cost_rate"] != round(params["variable_cost_ratio"] * 100, 3)
-        if diff:
-            params.pop("variable_cost_rate", None)
+        # 精确 ratio（0~1）优先；通用 rate 无论是否与 ratio 同量纲都丢掉，避免双字段
+        params.pop("variable_cost_rate", None)
 
     # ── 补充抽取：角色薪资（「厨师6000、服务员4500」→ 人均 5250）──
     _extract_role_salary(text, params)
+
+    # ── 「两个人工资一共1万2」：总额÷人数写人均，覆盖通用字段把总额当人均 ──
+    _extract_headcount(text, params)
+    _extract_labor_total(text, params)
+
+    # ── 年租金/房租一年 → 月租 = 年额/12（覆盖把年额当月租）──
+    _extract_annual_rent(text, params)
 
     # 人数合理性：无「N人」证据却抽出超大人数（如 3500）时丢弃，避免污染 C1
     ec = params.get("employee_count")

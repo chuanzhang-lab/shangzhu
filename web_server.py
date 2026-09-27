@@ -84,6 +84,9 @@ from session_state import (
     incr_advise_count,
     get_turn_number,
     get_biz_snapshot,
+    get_params_version,
+    set_last_analysis,
+    get_last_analysis,
 )
 
 # 工具（直调，不走 LLM）
@@ -208,6 +211,23 @@ _STATELESS_INTENTS = {"compare", "report_pdf", "report_excel", "market", "benchm
 
 # 安全限制：单条用户消息最大长度（字符数），防止极端输入拖垮引擎/LLM
 _MAX_INPUT_LENGTH = 10000
+# 闲聊 steward 硬超时：超时不阻断主流程。
+_LLM_ADVISE_TIMEOUT = 8.0
+# 顾问面板 / 按需 AI 解读：用户主动触发，允许完整调用完成。
+_ADVISOR_PANEL_TIMEOUT = 30.0
+
+
+async def _advise_with_timeout(*args, timeout=None, **kwargs):
+    """llm_advise 硬超时：超时不阻断结构化 JSON。"""
+    advise_timeout = _LLM_ADVISE_TIMEOUT if timeout is None else timeout
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(llm_advise, *args, **kwargs),
+            timeout=advise_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("LLM 解读跳过: 超时 %.0fs", advise_timeout)
+        return {"text": "", "ops": [], "_skipped": "timeout"}
 
 # 对比句中常用来引出「假设/变更方案」的引导词
 _COMPARE_MARKERS = ("如果", "假设", "要是", "若", "换成", "改为", "变成",
@@ -711,6 +731,13 @@ class ChatRequest(BaseModel):
     task_id: Optional[str] = None
 
 
+class AdviceRequest(BaseModel):
+    thread_id: Optional[str] = "default"
+    task_id: Optional[str] = None
+    analysis_id: Optional[str] = None
+    params_version: Optional[int] = None
+
+
 class TaskReq(BaseModel):
     # 安全审查 S7：任务名长度上限（防超大任务名入库）
     name: str = Field(default="新任务", max_length=100)
@@ -779,7 +806,7 @@ CHAT_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>创业者工作台</title>
-<link rel="stylesheet" href="/static/app.css?v=20260905a">
+<link rel="stylesheet" href="/static/app.css?v=20260413a">
 </head>
 <body>
 <header>
@@ -853,7 +880,7 @@ CHAT_HTML = """<!DOCTYPE html>
     <div id="advisor-list" style="display:none;"></div>
   </aside>
 </div>
-<script src="/static/app.js?v=20260905a"></script>
+<script src="/static/app.js?v=20260413a"></script>
 </body>
 </html>
 """
@@ -1059,8 +1086,9 @@ async def get_advisor(tid: str):
 
     # 调用 LLM（与 /chat 同源 advise，非阻塞）
     try:
-        advice = await asyncio.to_thread(
-            llm_advise, scan, "", clean_view, advise_context,
+        advice = await _advise_with_timeout(
+            scan, "", clean_view, advise_context,
+            timeout=_ADVISOR_PANEL_TIMEOUT,
         )
     except Exception as e:
         logger.warning(f"顾问 LLM 调用失败: {e}")
@@ -1070,6 +1098,121 @@ async def get_advisor(tid: str):
     from advisor.advisor_formatter import format_advice
     formatted = format_advice(advice, clean_view, param_sources)
     return JSONResponse(formatted)
+
+
+@app.post("/analysis/advice")
+async def post_analysis_advice(req: AdviceRequest):
+    """按需生成本轮结构化结果的 AI 解读（不并入 /chat，不影响顾问 Tab）。
+
+    校验 analysis_id + params_version：参数已变则返回 stale，不贴旧解读。
+    """
+    tid = req.task_id or req.thread_id or ""
+    if not tid:
+        return JSONResponse({"error": "无效 tid", "status": "error"}, status_code=400)
+
+    snap = get_last_analysis(tid)
+    if not snap:
+        return JSONResponse({
+            "status": "idle",
+            "text": "",
+            "ops": [],
+            "ops_block": "",
+            "reason": "暂无本轮分析，请先发送项目参数",
+        }, status_code=404)
+
+    current_version = get_params_version(tid)
+    snap_version = snap.get("params_version")
+    snap_id = snap.get("analysis_id")
+    if req.analysis_id and snap_id and req.analysis_id != snap_id:
+        return JSONResponse({
+            "status": "stale",
+            "text": "",
+            "ops": [],
+            "ops_block": "",
+            "reason": "这是上一轮分析，请对最新结果重新生成解读",
+            "analysis_id": snap_id,
+            "params_version": current_version,
+        })
+    if req.params_version is not None and (
+        req.params_version != snap_version or snap_version != current_version
+    ):
+        return JSONResponse({
+            "status": "stale",
+            "text": "",
+            "ops": [],
+            "ops_block": "",
+            "reason": "参数已更新，请对最新分析结果重新生成解读",
+            "analysis_id": snap_id,
+            "params_version": current_version,
+        })
+
+    scan = snap.get("scan") or {}
+    user_text = snap.get("user_text") or ""
+    intent = snap.get("intent") or ""
+    base_params = snap.get("params") or get_biz_snapshot(tid).get("params") or {}
+    advise_context = _build_advise_context(tid, scan)
+    try:
+        advice = await _advise_with_timeout(
+            scan,
+            user_text,
+            to_llm_view(tid, focus_fields=infer_focus_fields(user_text)),
+            advise_context,
+            timeout=_ADVISOR_PANEL_TIMEOUT,
+        )
+    except Exception as e:
+        logger.warning("按需解读失败: %s", e)
+        advice = {"text": "", "ops": [], "_skipped": "error"}
+
+    advice_text = advice.get("text", "") if isinstance(advice, dict) else (advice or "")
+    ops_proposals = advice.get("ops", []) if isinstance(advice, dict) else []
+    skipped = isinstance(advice, dict) and advice.get("_skipped")
+
+    if intent == "decide" and advice_text:
+        from decision_engine import forbidden_tone_scan
+        if forbidden_tone_scan(advice_text):
+            advice_text = ""
+
+    has_conflict = bool((scan.get("derived_issues") or []) if isinstance(scan, dict) else [])
+    if has_conflict:
+        ops_proposals = []
+        from field_model import conflict_resolution_ops
+        ops_proposals = conflict_resolution_ops(base_params) or []
+
+    if isinstance(advice, dict) and advice.get("meta"):
+        m = advice["meta"]
+        if m.get("made_recommendation"):
+            _incr_advise_meta(tid, "recommendation_count")
+        if m.get("asked_question"):
+            _reset_advise_meta(tid)
+            _incr_advise_meta(tid, "question_count")
+
+    ops_block = ""
+    if ops_proposals:
+        ops_block = _render_ops_block(ops_proposals, base_params, scan) or ""
+        if ops_block:
+            from session_state import set_pending_ops
+            set_pending_ops(tid, ops_proposals)
+
+    if skipped and not advice_text:
+        status = "timeout" if advice.get("_skipped") == "timeout" else "error"
+        return JSONResponse({
+            "status": status,
+            "text": "",
+            "ops": ops_proposals,
+            "ops_block": ops_block,
+            "analysis_id": snap_id,
+            "params_version": current_version,
+            "reason": "解读超时，可重试" if status == "timeout" else "解读失败，可重试",
+        })
+
+    return JSONResponse({
+        "status": "ok" if advice_text else "empty",
+        "text": advice_text,
+        "ops": ops_proposals,
+        "ops_block": ops_block,
+        "analysis_id": snap_id,
+        "params_version": current_version,
+    })
 
 
 @app.get("/advisor/preview")
@@ -1226,7 +1369,16 @@ async def chat(req: ChatRequest):
             }, status_code=400)
 
         # ── 步骤 1: 意图路由（纯规则，0 LLM） ──
-        intent, confidence = detect_intent(last_user_msg)
+        # has_base 必须在 merge 之前取：弱对比词「如果」仅在已有项目参数时进 compare
+        _base_snap = get_biz_snapshot(tid)
+        _base_params = _base_snap.get("params") or {}
+        has_base = any(
+            (not str(k).startswith("_")
+             and k not in ("industry", "city", "stage")
+             and v not in (None, "", [], {}))
+            for k, v in _base_params.items()
+        )
+        intent, confidence = detect_intent(last_user_msg, has_base=has_base)
         logger.info(f"意图: {intent} (置信度: {confidence:.1f}) | 输入: {last_user_msg[:50]}")
 
         # ── 步骤 1.5: 把本句抽出的参数累积进 SessionState（唯一真相源）──
@@ -1330,62 +1482,30 @@ async def chat(req: ChatRequest):
                 guard_banner = _render_guard_banner(guard_info, routed["data"])
                 if guard_banner:
                     content = guard_banner + "\n\n" + content
-                # Phase 2: LLM 协作层（被动、只读、基于结构化输出解读）
-                # P4-7：传入 SessionState **清洁视图**（无 raw_text，含本轮变更），
-                # 避免对账幻觉；返回 {text, ops}
-                try:
-                    # 关键：llm_advise 内部是**同步阻塞**的 LLM 网络调用，必须用
-                    # asyncio.to_thread 丢到线程池，否则会冻结整个 FastAPI 事件循环
-                    # （所有并发请求一起卡死，最长可达 timeout 秒）。
-                    # 主持人模式：传入 context 让 LLM 决定追问/推荐/静默
-                    advise_context = _build_advise_context(tid, routed["data"])
-                    advice = await asyncio.to_thread(
-                        llm_advise,
-                        routed["data"],
-                        last_user_msg,
-                        to_llm_view(tid, focus_fields=infer_focus_fields(last_user_msg)),
-                        advise_context,
-                    )
-                    advice_text = advice.get("text", "") if isinstance(advice, dict) else (advice or "")
-                    ops_proposals = advice.get("ops", []) if isinstance(advice, dict) else []
-                    # 主持人模式：更新计数器（根据 LLM meta 判断 LLM 做了什么）
-                    if isinstance(advice, dict) and advice.get("meta"):
-                        m = advice["meta"]
-                        if m.get("made_recommendation"):
-                            _incr_advise_meta(tid, "recommendation_count")
-                        if m.get("asked_question"):
-                            # 追问打断「连续推荐」：清零推荐计数，重新给推荐机会
-                            _reset_advise_meta(tid)
-                            _incr_advise_meta(tid, "question_count")
-                    # L2 决策（D5）：LLM 解读禁止「建议你/你应该/必须…」倾向词。
-                    # 命中任何倾向词 → 丢弃整段 LLM 解读，规则层客观结构独自成立。
-                    if intent == "decide" and advice_text:
-                        from decision_engine import forbidden_tone_scan
-                        if forbidden_tone_scan(advice_text):
-                            advice_text = ""
-                    # 数据冲突（派生一致性矛盾）：规则层已前置横幅。
-                    # 不再拦截 ops——改为用 field_model.conflict_resolution_ops
-                    # 自动生成「口径对齐 ops」，让用户用「应用A/B」一键修正。
-                    # LLM 自己出的 ops 仍丢弃（不靠 LLM 猜哪个口径对）。
-                    has_conflict = bool((routed["data"].get("derived_issues") or []) if isinstance(routed.get("data"), dict) else [])
-                    if has_conflict:
-                        ops_proposals = []  # 丢弃 LLM 的 ops
-                        from field_model import conflict_resolution_ops
-                        conflict_ops = conflict_resolution_ops(merged)
-                        if conflict_ops:
-                            ops_proposals = conflict_ops  # 用规则层生成的对齐 ops
-                    if advice_text:
-                        content += "\n\n---\n\n💡 **AI 解读**\n\n" + advice_text
-                    # Tier 1 编排：若有 ops，预览渲染成「方案X→月利润Y，回『应用X』生效」
+                # 规则层冲突对齐 ops（不走 LLM）：用户可「应用A/B」一键修正口径。
+                has_conflict = bool(
+                    (routed["data"].get("derived_issues") or [])
+                    if isinstance(routed.get("data"), dict) else []
+                )
+                if has_conflict:
+                    from field_model import conflict_resolution_ops
+                    ops_proposals = conflict_resolution_ops(merged) or []
                     if ops_proposals:
                         ops_block = _render_ops_block(ops_proposals, merged, routed["data"])
                         if ops_block:
                             content += "\n\n---\n\n" + ops_block
-                            # 原子写入 session，等用户回「应用X」时取出 op 应用
                             from session_state import set_pending_ops
                             set_pending_ops(tid, ops_proposals)
-                except Exception as e:  # noqa
-                    logger.warning(f"LLM 解读跳过: {e}")
+                params_version = get_params_version(tid)
+                analysis_id = str(_uuid.uuid4())
+                set_last_analysis(tid, {
+                    "analysis_id": analysis_id,
+                    "params_version": params_version,
+                    "intent": intent,
+                    "user_text": last_user_msg,
+                    "scan": routed.get("data") or {},
+                    "params": routed.get("params") or merged,
+                })
                 _persist_turn(store, tid, last_user_msg, content)
                 return JSONResponse({
                     "content": content,
@@ -1396,6 +1516,12 @@ async def chat(req: ChatRequest):
                     "ops_available": bool(ops_proposals),
                     "param_sources": (routed.get("data") or {}).get("param_sources", {}),
                     "derived": (routed.get("data") or {}).get("derived", []),
+                    "ai_advice": {
+                        "available": True,
+                        "status": "idle",
+                        "analysis_id": analysis_id,
+                        "params_version": params_version,
+                    },
                 })
 
             # 业务意图绝不漏给自由 agent（避免编造）；工具兜不住时给友好提示
@@ -1433,9 +1559,9 @@ async def chat(req: ChatRequest):
             )
         advice_obj = {"text": "", "ops": []}
         try:
-            # 主持人模式：传入 context
+            # 主持人模式：传入 context；8s 硬超时，超时不阻断主流程
             advise_context = _build_advise_context(tid, scan)
-            advice_obj = await asyncio.to_thread(llm_advise, scan, user_text, clean_view, advise_context)
+            advice_obj = await _advise_with_timeout(scan, user_text, clean_view, advise_context)
         except Exception as e:  # noqa
             logger.warning(f"LLM 解读跳过: {e}")
         advice_text = advice_obj.get("text", "") if isinstance(advice_obj, dict) else (advice_obj or "")

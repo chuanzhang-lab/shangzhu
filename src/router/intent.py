@@ -58,8 +58,9 @@ _RULES = [
             "选哪个", "选a", "选b", "方案a", "方案b",
             "如果", "假如", "假设", "要是",
             # P4-3 what-if 选择类：让「减租好还是提价好」等归引擎 compare
+            # 孤立「还是」不进词表（「我还是开个面馆吧」不是对比）
             "好还是", "还是好", "哪个更好", "怎么选", "选哪个好",
-            "更划算", "哪个划算", "a还是b", "还是", "哪个好",
+            "更划算", "哪个划算", "a还是b", "哪个好",
         ],
         [r"\bvs\.?\b", r"方案\s*[abAB]", r"\bif\b", r"如果.*会",
          # P4-3 what-if 选择问句：「X好，还是Y好」「减租还是提价」归引擎 compare
@@ -79,7 +80,10 @@ _RULES = [
             "12个月", "一年走势", "回本时间", "回本", "现金流走势",
             "几个月回本", "多久回本", "什么时候盈利",
         ],
-        [r"\d+\s*个?月", r"未来\s*\d+\s*个?月", r"趋势", r"预测", r"回本"],
+        # 裸「N个月」会把「押金3个月房租」打成 trend；必须靠近回本/趋势词
+        [r"(?:回本|趋势|未来|预测|走势).{0,8}\d+\s*个?月",
+         r"\d+\s*个?月.{0,8}(?:回本|趋势|未来|预测|走势)",
+         r"未来\s*\d+\s*个?月", r"趋势", r"预测", r"回本"],
     ),
     # L2 决策（验证期决策工作台）：该不该开/继续/先验证/撑多久→decide
     # （怎么扭亏/调参已归 suggest，此处只收决策类问句；决策类型由 decide 子路由细分）
@@ -226,7 +230,30 @@ def _looks_like_param_update(text: str) -> bool:
     return False
 
 
-def _finalize(intent: str, score: float, text: str) -> Tuple[str, float]:
+
+_WEAK_COMPARE_MARKERS = ("如果", "假如", "假设", "要是")
+_STRONG_COMPARE_MARKERS = (
+    "对比", "比较", "vs", "两种方案", "两个方案",
+    "选哪个", "选a", "选b", "方案a", "方案b",
+    "好还是", "还是好", "哪个更好", "哪个好", "怎么选",
+    "更划算", "哪个划算", "a还是b",
+)
+
+
+def _has_strong_compare(text: str) -> bool:
+    t = text or ""
+    low = t.lower()
+    if any(m in t or m in low for m in _STRONG_COMPARE_MARKERS):
+        return True
+    if re.search(r"好\s*[，,]?\s*还是", t) or re.search(r"还是\s*[^，。？！]*好", t):
+        return True
+    if re.search(r"方案\s*[abAB]", t) or re.search(r"\bvs\.?\b", t, re.IGNORECASE):
+        return True
+    return False
+
+
+def _finalize(intent: str, score: float, text: str,
+              has_base: bool = False) -> Tuple[str, float]:
     """最终意图裁定（含兜底）。
 
     Phase 3 修复：纯 chitchat 但文本含核心项目参数时，强制走 quick_scan，
@@ -235,7 +262,14 @@ def _finalize(intent: str, score: float, text: str) -> Tuple[str, float]:
 
     L2 决策：文本含强决策问句（该不该/要不要开或续/先验证/撑多久/值不值）时，
     即使夹带参数描述也应归 decide，让规则层给「选项+风险+验证」而非纯仪表盘。
+
+    弱对比词（如果/假如/假设/要是）：仅当会话已有 base、或句内确有对比结构
+    时才保留 compare；否则降为 quick_scan 并允许 merge。
     """
+    if intent == "compare" and not _has_strong_compare(text):
+        if any(m in (text or "") for m in _WEAK_COMPARE_MARKERS):
+            if not has_base:
+                intent = "quick_scan" if _looks_like_param_update(text) else "chitchat"
     if intent == "chitchat" and _looks_like_param_update(text):
         return ("quick_scan", max(score, 0.9))
     if intent in ("quick_scan", "chitchat") and _looks_like_decision_question(text):
@@ -308,10 +342,13 @@ def _score_intent(text: str) -> Tuple[str, float]:
     return matches[0]
 
 
-def detect_intent(text: str) -> Tuple[str, float]:
+def detect_intent(text: str, has_base: bool = False) -> Tuple[str, float]:
     """
     检测用户输入的意图。
     多子句时按"优先级最高的非 chitchat 子句"选主意图。
+
+    has_base: 会话里是否已有项目参数。弱对比词（如果/假如）仅在已有 base
+    时才进 compare，避免首句「如果租金是8000」被当成假设分析且不入 session。
 
     返回 (intent_name, score)。
     """
@@ -331,18 +368,18 @@ def detect_intent(text: str) -> Tuple[str, float]:
         # 取第一个非 chitchat
         for intent, score in scored:
             if intent != "chitchat":
-                return _finalize(intent, score, text)
+                return _finalize(intent, score, text, has_base=has_base)
         intent, score = (scored[0] if scored else ("chitchat", 0.0))
-        return _finalize(intent, score, text)
+        return _finalize(intent, score, text, has_base=has_base)
 
     # 单子句
     intent, score = _score_intent(text)
-    return _finalize(intent, score, text)
+    return _finalize(intent, score, text, has_base=has_base)
 
 
-def detect_intent_safe(text: str) -> str:
+def detect_intent_safe(text: str, has_base: bool = False) -> str:
     """便捷版本：只返回意图名。"""
-    intent, _ = detect_intent(text)
+    intent, _ = detect_intent(text, has_base=has_base)
     return intent
 
 
