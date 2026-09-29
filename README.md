@@ -4,7 +4,7 @@
 
 面向中国小微企业主与个体创业者的本地财务建模工作台——开一家牛肉面店、咖啡馆、夫妻店这类真实场景，而不是融资路演用的精美模型。
 
-**English version: [README_EN.md](README_EN.md)**
+**English edition: [chuanzhang-lab/shangzhu-en](https://github.com/chuanzhang-lab/shangzhu-en)**（独立仓库，界面与输出全英文）
 
 ---
 
