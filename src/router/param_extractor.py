@@ -221,6 +221,9 @@ def _parse_number(raw: str) -> Optional[float]:
     if raw.startswith("-") or raw.startswith("负"):
         negative = True
         raw = raw[1:].strip()
+    # 千分位逗号：英文写法「12,000」必须读成 12000，否则只取到 12（静默差 1000 倍）。
+    # 只剥离「数字,数字」之间的逗号，不误伤其它逗号用法。
+    raw = re.sub(r"(?<=[0-9]),(?=[0-9])", "", raw)
 
     # 纯中文数字（含 万/亿 与缩写），如 "一万二" "两万" "一千五"
     if re.fullmatch(r"[零一二两三四五六七八九十百千万亿]+", raw):
@@ -486,7 +489,17 @@ def _inject_field_boundaries(text: str) -> str:
 
 def _split_segments(text: str) -> List[str]:
     """按分隔符切分文本（保留空格）"""
-    return re.split(r"[,，;。；]+", text)
+    # ⚠️ 英文千分位「300,000」里的逗号**不是**分隔符：原 `[,，;。；]+` 会把
+    # 「投资300,000元」切成 "300" + "000"，抽成 300（静默差 1000 倍）。
+    # 只切「非数字包围」的逗号，数字之间的逗号保留。
+    #
+    # ⚠️ ASCII 句点必须按「句子边界」切（后随空白或串尾才算）：
+    # 「月租8000. 员工2人」整段共享第一个数字 → 员工数兜底抓到 8000 被丢弃。
+    # 小数保护：「3.5」句点后是数字 → 不切，行为不变。
+    # 「!?！？」同类句子终结符一并纳入（数字中不可能出现，无小数风险）。
+    return re.split(
+        r"(?:[，;。；!?！？]|\.(?=\s|$)|,(?![0-9])|(?<![0-9]),)+", text
+    )
 
 
 def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
@@ -638,6 +651,10 @@ def _find_number(text: str, units, strict: bool = False,
     # (?<!\d)：负号前不得紧跟数字，否则「每天卖100-150碗」的区间分隔符会被当成负号
     #          → 抽成 -150 被 guard 判 critical 剔除，反而丢了正常客流（D1 修复的连带回归）。
     _SIGN = r"(?<!\d)(?:-|－|−|负)\s*"
+    # 数字：优先匹配英文千分位分组「300,000」，再匹配普通小数。
+    # 不加这一支，「总投资300,000元」只会捕到 "300"（静默差 1000 倍）。
+    # 中文没有千分位写法，行为不变。
+    _NUM = r"(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)"
 
     negative = False
     if text.startswith("-") or text.startswith("负"):
@@ -653,7 +670,7 @@ def _find_number(text: str, units, strict: bool = False,
             if u not in units_list:
                 continue
             m = re.search(
-                rf"((?:{_SIGN})?\d+(?:\.\d+)?\s*{u})(\d)"
+                rf"((?:{_SIGN})?{_NUM}\s*{u})(\d)"
                 r"(?!\s*[人个位名杯碗份件瓶只条张袋盒串盘年月天日])",
                 text,
             )
@@ -667,13 +684,13 @@ def _find_number(text: str, units, strict: bool = False,
         units_list = units if isinstance(units, list) else [units]
         for u in units_list:
             # 数字 + 单位
-            m = re.search(rf"((?:{_SIGN})?\d+(?:\.\d+)?\s*{u})", text)
+            m = re.search(rf"((?:{_SIGN})?{_NUM}\s*{u})", text)
             if m:
                 val = _parse_number(m.group(1))
                 if val is not None:
                     return -val if negative else val
             # 单位 + 数字（「一杯25」的「杯」前是「一」，不是客流单位）
-            m = re.search(rf"((?<![一每]){u}\s*(?:{_SIGN})?\d+(?:\.\d+)?)", text)
+            m = re.search(rf"((?<![一每]){u}\s*(?:{_SIGN})?{_NUM})", text)
             if m:
                 val = _parse_number(m.group(1))
                 if val is not None:
@@ -683,7 +700,7 @@ def _find_number(text: str, units, strict: bool = False,
             return None
 
     # 2. 普通数字 + 元/万/千（元可选：覆盖「固定成本2500」无单位阿拉伯数字）
-    m = re.search(rf"((?:{_SIGN})?\d+(?:\.\d+)?(?:\s*[万千]|\s*元?))", text)
+    m = re.search(rf"((?:{_SIGN})?{_NUM}(?:\s*[万千]|\s*元?))", text)
     if m:
         val = _parse_number(m.group(1))
         if val is not None:

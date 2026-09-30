@@ -146,3 +146,22 @@ def test_dedup_utilities_vs_other_fixed():
     p2 = extract_params("水电2000、杂费1000")
     assert p2.get("utilities") == 2000.0
     assert p2.get("other_fixed") == 1000.0, "分别给出时应各自保留"
+
+
+# ── 切段层回归：句子终结符切段 + 小数/千分位保护 ──────────────────────────
+def test_sentence_terminators_split_clauses():
+    """句号/问号/叹号切段后各子句独立抽取，员工数不得被相邻子句的 8000 挤掉。
+
+    根因：ASCII 句点原不在切段集里（中文 。 一直在）→ 多子句挤在一段，
+    employee_count 兜底抓到相邻子句的 8000（>200 上限）→ 整条丢弃。
+    """
+    p = extract_params("月租金8000。员工2人，每人工资5000")
+    assert p.get("monthly_rent") == 8000.0
+    assert p.get("employee_count") == 2.0
+    assert p.get("avg_salary") == 5000.0
+
+
+def test_decimal_point_and_thousands_separator_are_never_boundaries():
+    """小数点不是句子边界（不得切成 3+5）；千分位逗号不得切出 300+000。"""
+    assert _get("客单价3.5元", "price_per_unit") == 3.5
+    assert _get("总投资300,000元", "total_investment") == 300000.0
