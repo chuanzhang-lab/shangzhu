@@ -15,8 +15,11 @@ OUT_FILE="${BACKUP_DIR}/${DB_NAME}_${DATE_TAG}.sql.gz"
 
 mkdir -p "$BACKUP_DIR"
 
+# 连接用户：优先 PGUSER，否则当前系统用户（免密 peer 连接，不绑定机器）
+DB_USER="${PGUSER:-$(whoami)}"
+
 echo "[backup] Dumping ${DB_NAME} → ${OUT_FILE}"
-pg_dump "postgresql://newmacbook@localhost:5432/${DB_NAME}" | gzip > "$OUT_FILE"
+pg_dump "postgresql://${DB_USER}@localhost:5432/${DB_NAME}" | gzip > "$OUT_FILE"
 
 echo "[backup] Done — $(du -h "$OUT_FILE" | cut -f1)"
 

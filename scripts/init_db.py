@@ -7,17 +7,21 @@
 
 依赖：psycopg 3（已在 .venv）。可重复执行（CREATE IF NOT EXISTS）。
 """
+import getpass
 import os
 import sys
 
 import psycopg
 
+# 免密本地连接默认用当前系统用户名（peer auth），不绑定某台机器；可用环境变量覆盖。
+_LOCAL_USER = getpass.getuser()
+
 # 管理员连接（默认连 postgres 库，用于建库）。可用 PGADMIN_URL 覆盖。
-DEFAULT_ADMIN_URL = "postgresql://newmacbook@localhost:5432/postgres"
+DEFAULT_ADMIN_URL = f"postgresql://{_LOCAL_USER}@localhost:5432/postgres"
 DB_NAME = "shangzhu"
 
 # 业务连接（建表用）。可用 PGDATABASE_URL 覆盖。
-DEFAULT_URL = f"postgresql://newmacbook@localhost:5432/{DB_NAME}"
+DEFAULT_URL = f"postgresql://{_LOCAL_USER}@localhost:5432/{DB_NAME}"
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (

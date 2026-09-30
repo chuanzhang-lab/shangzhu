@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import getpass
 import json
 import logging
 import os
@@ -289,7 +290,9 @@ class LocalFileStore(BaseStore):
 
 
 # ── 数据库连接配置 ────────────────────────────────────────────────────────
-_DEFAULT_DB_URL = "postgresql://newmacbook@localhost:5432/shangzhu"
+# 默认走本机当前用户名的免密 peer 连接（与 README「<系统用户名>」口径一致），
+# 可被 PGDATABASE_URL / config/storage.json 的 db_url 覆盖。
+_DEFAULT_DB_URL = f"postgresql://{getpass.getuser()}@localhost:5432/shangzhu"
 
 
 # ── 表结构（DDL 单源）────────────────────────────────────────────────────
