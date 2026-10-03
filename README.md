@@ -10,6 +10,29 @@ A local-first financial modeling workbench for micro-entrepreneurs opening a noo
 
 **English edition (separate repo): [chuanzhang-lab/shangzhu-en](https://github.com/chuanzhang-lab/shangzhu-en)**
 
+**Version / 版本：`0.2.0`**
+
+---
+
+## 更新说明 / What's New
+
+### `0.2.0` — 四层防线：事故复盘系统性整改 / Four-Layer Defense
+
+#### 中文
+
+2026-10-01 前端遮蔽事故不是孤立 bug，是四类系统性问题叠加。本版建立四层防线，让同类问题**不可能静默复发**：
+
+- **第 1 层 运行态自证**：静态资源 `?v=` 改为 mtime 动态版本号（改文件即换 URL）+ `Cache-Control: no-cache`，旧前端缓存不再阴魂不散；版本握手——`/health` 暴露 `static_ver`/`commit`，页面过期自动弹「请硬刷新」横幅（长开标签页兜底）；前端错误统一上报 `/client-log` 落服务端日志（`WEBCLIENT`），排查不再依赖口述。
+- **第 2 层 静默失败治理**：前端 catch-all 统一走 `reportClientError`（console `[失败于[阶段:错误码]]` + 上报）；未 await 的 `switchTask` 补 `.catch`；56 处 `except Exception` 三档审计表落 `docs/except-audit-20261003.md`。
+- **第 3 层 门禁**：ESLint（no-shadow/no-undef 错误级）+ `make lint`；git pre-commit 与 GitHub Actions 双门禁（compile + lint + test 三件套）；浏览器 e2e 冒烟 `make e2e`（真 Chromium 拦运行期 TypeError）。
+- **第 4 层 测试盲区**：测试库隔离（`tests/conftest.py`——测试不再写真实数据，自动建 `shangzhu_test` 测试库，无 PG 环境降级本地文件照跑）；测试残留清理 `scripts/clean_test_tasks.py`；双副本 drift 护栏（事故形态不变量对比）；孤儿数据迁移 `scripts/migrate_json_to_pg.py`。
+- **工程公约**入 `AGENT.md`：降级必有痕 / 异常不吞 / 每事故一护栏。
+- 测试 451 → 474（+23 条护栏）；全部护栏含负向实测（注入事故同款缺陷验证门禁真的变红）。
+
+#### English
+
+The 2026-10-01 front-end shadowing incident was four systemic failures stacked together. This release installs four defense layers so the same class of bugs **cannot silently recur**: runtime self-attestation (dynamic `?v=` + `no-cache` + version handshake + `/client-log` error reporting), silent-failure governance (unified `reportClientError` with `[failed-at[stage:code]]` markers, 56-site `except` audit), gates (ESLint, pre-commit + GitHub Actions, real-browser e2e smoke), and test blind-spot fixes (DB-isolated test fixtures, copy-drift guard, orphan-data migration). Engineering covenants ("degradations must leave a trace", "never swallow exceptions", "one guard test per incident") are now in `AGENT.md`. Tests: 451 → 474, every guard verified to actually turn red on injected defects.
+
 ---
 
 ## 它和"财务计算器"有什么不同 / How It Differs from a "Financial Calculator"
