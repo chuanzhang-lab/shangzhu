@@ -666,6 +666,37 @@ function reportClientError(stage, code, err) {
       fetch('/client-log', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: payload, keepalive: true }).catch(() => {});
     }
   } catch (_) { /* 上报失败绝不二次打扰用户 */ }
+  checkVersionHandshake();  // 出错时顺带核对版本：旧前端缓存是静默失败的头号嫌疑
+}
+
+// ── 版本握手（M-05）────────────────────────────────────────────────────────
+// 页面自带 build 号（window.__PAGE_VER__，服务端渲染时注入 _static_ver 值），
+// 与 /health 的 static_ver 比对：不一致 = 浏览器在跑旧前端（长开标签页/缓存漏网），
+// 顶部横幅提示硬刷新。/health 不可达时静默跳过——握手失败绝不制造次生噪音。
+let _verBannerShown = false;
+let _verCheckAt = 0;
+function showVersionBanner() {
+  if (_verBannerShown) return;
+  _verBannerShown = true;
+  const el = document.createElement('div');
+  el.id = 'version-banner';
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#b45309;color:#fff;padding:10px 16px;font-size:13px;text-align:center;';
+  el.textContent = '⚠️ 页面版本过旧，请硬刷新（Cmd+Shift+R / Ctrl+Shift+R）';
+  el.addEventListener('click', () => location.reload(true));
+  document.body.appendChild(el);
+}
+async function checkVersionHandshake() {
+  const now = Date.now();
+  if (now - _verCheckAt < 60000) return;  // 节流：每分钟最多核对一次
+  _verCheckAt = now;
+  try {
+    const r = await fetch('/health');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d && d.static_ver && window.__PAGE_VER__ && String(d.static_ver) !== String(window.__PAGE_VER__)) {
+      showVersionBanner();
+    }
+  } catch (_) { /* 握手失败静默 */ }
 }
 
 function setToast(msg, color) {
@@ -1099,3 +1130,4 @@ async function send() {
 }
 
 loadTasks();
+checkVersionHandshake();  // 加载即核对版本（长开标签页/旧缓存兜底，M-05）

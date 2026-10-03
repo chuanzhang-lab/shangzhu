@@ -154,6 +154,28 @@ def _read_app_version() -> str:
 
 APP_VERSION = _read_app_version()
 
+
+def _read_git_commit() -> str:
+    """构建指纹：git 短 commit（启动时读一次，进程内缓存）。
+
+    用途：/health 暴露给版本握手与排查——「用户跑的是哪个提交」可一眼定位。
+    非 git 环境（zip 包部署）读不到就返回 "unknown"，不阻塞启动。
+    """
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+GIT_COMMIT = _read_git_commit()
+
 def _setup_logging() -> logging.Logger:
     """配置控制台 + 文件双通道日志。"""
     log = logging.getLogger("web")
@@ -914,6 +936,7 @@ CHAT_HTML = """<!DOCTYPE html>
     <div id="advisor-list" style="display:none;"></div>
   </aside>
 </div>
+<script>window.__PAGE_VER__='__APP_JS_VER__';</script>
 <script src="/static/app.js?v=__APP_JS_VER__"></script>
 </body>
 </html>
@@ -959,6 +982,8 @@ async def health():
         "model": get_model_name(),
         "endpoint": get_base_url(),
         "version": APP_VERSION,
+        "commit": GIT_COMMIT,
+        "static_ver": _static_ver("app.js"),
         "uptime_seconds": uptime_seconds,
         "llm_configured": has_api_key(),
         "sessions": stats,
