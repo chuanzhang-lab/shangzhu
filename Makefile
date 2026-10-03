@@ -9,6 +9,7 @@ help:
 	@echo "make sync     - uv sync 安装主依赖 (A)"
 	@echo "make test     - 全量回归（pytest 收集 tests/ 全部测试文件）"
 	@echo "make lint     - ESLint 前端门禁（no-shadow/no-undef 错误级）"
+	@echo "make e2e      - 浏览器 e2e 冒烟（真 Chromium，需 node + playwright）"
 	@echo "make smoke    - 导入 + health 结构冒烟（不启服务）"
 	@echo "make compile  - 字节码编译检查"
 	@echo "make start    - 启动本地服务 (PORT=$(PORT))"
@@ -30,6 +31,11 @@ smoke:
 # 扫整个 web_static 目录：新增前端文件自动进门禁，不只 app.js
 lint:
 	npx eslint src/web_static/
+
+# 浏览器 e2e 冒烟（M-08）：真 Chromium 加载→新建任务→断言零 console error/
+# 零未捕获异常/零 /client-log 上报。静态扫描测不出的运行期 TypeError 在这里拦。
+e2e:
+	node tests/e2e/smoke.mjs
 
 compile:
 	$(PY) -m compileall -q src web_server.py tests
