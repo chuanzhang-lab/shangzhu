@@ -1,0 +1,14 @@
+{
+  "name": "shangzhu-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "创业者工作台前端静态资源的 lint 工具链（不参与运行时）",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint src/web_static/app.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  }
+}

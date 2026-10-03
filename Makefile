@@ -1,5 +1,5 @@
 # 创业者工作台 (A) — 常用工程命令
-.PHONY: help sync test smoke start health compile
+.PHONY: help sync test smoke lint e2e start health compile
 
 PY ?= .venv/bin/python3
 # 端口统一口径：与 start.sh / web_server.py 默认值一致（8081）
@@ -7,7 +7,8 @@ PORT ?= 8081
 
 help:
 	@echo "make sync     - uv sync 安装主依赖 (A)"
-	@echo "make test     - 全量回归（pytest 收集 tests/ 全部 33 个测试文件）"
+	@echo "make test     - 全量回归（pytest 收集 tests/ 全部测试文件）"
+	@echo "make lint     - ESLint 前端门禁（no-shadow/no-undef 错误级）"
 	@echo "make smoke    - 导入 + health 结构冒烟（不启服务）"
 	@echo "make compile  - 字节码编译检查"
 	@echo "make start    - 启动本地服务 (PORT=$(PORT))"
@@ -24,6 +25,10 @@ test:
 
 smoke:
 	$(PY) -c "import web_server as w; h=w.app.router.routes; assert any(getattr(r,'path',None)=='/health' for r in h); print('smoke_ok', w.APP_VERSION, w.MODEL_NAME)"
+
+# 门禁：ESLint 错误级 = no-shadow / no-undef（点状事故升级为面状规则）
+lint:
+	npx eslint src/web_static/app.js
 
 compile:
 	$(PY) -m compileall -q src web_server.py tests
