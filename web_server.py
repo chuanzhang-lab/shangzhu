@@ -791,12 +791,46 @@ async def require_xhr_for_writes(request: Request, call_next):
             return JSONResponse({"error": "missing X-Requested-With header"}, status_code=403)
     return await call_next(request)
 
+
+@app.middleware("http")
+async def no_cache_runtime_assets(request: Request, call_next):
+    """动态/版本化资源强制回源校验（Cache-Control: no-cache）。
+
+    背景（2026-10-01 遮蔽 bug 事故的缓存侧根因，shangzhu-en 已修，此处移植）：
+    `/static/*` 此前只有 ETag/Last-Modified、没有 Cache-Control，浏览器按
+    「启发式新鲜度」(≈10%×(now−Last-Modified)) 直接用旧副本，长开的标签页
+    更是永不重取 JS——app.js 修好的 bug 在用户页面上照旧复现。
+
+    no-cache ≠ no-store：仍可拿 ETag/Last-Modified 走 304（省流量），
+    只杜绝「不回源就用旧副本」。`/` 是动态外壳（模型名/版本号渲染时注入），
+    同样必须每次校验，否则旧外壳会指向旧的 ?v= 资源 URL。
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") or path == "/":
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
 # M3：前端静态资源（app.css / app.js）从 CHAT_HTML 内联抽取为独立文件，
 # 由 FastAPI StaticFiles 挂载到 /static。抽取后 CHAT_HTML 仅剩 HTML 骨架。
 import os as _os
 _STATIC_DIR = _os.path.join(SCRIPT_DIR, "src", "web_static")
 if _os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+
+def _static_ver(rel: str) -> str:
+    """静态资源版本号 = 文件 mtime（整秒），拼进 `?v=` 做缓存失效。
+
+    以前 `?v=20260413a` 写死、从不更新：改了 app.js，浏览器拿到的 URL 却
+    一个字节没变 → 旧缓存/旧标签页继续跑修复前的代码（2026-10-01 的
+    翻译函数遮蔽 bug 就是这样在用户页面上「阴魂不散」的）。
+    现在文件一改 → mtime 变 → URL 变 → 缓存条目天然失效，无需手工 bump。
+    """
+    try:
+        return str(int(os.path.getmtime(os.path.join(_STATIC_DIR, rel))))
+    except (OSError, TypeError, ValueError):
+        return "0"  # 文件读不到也不把 ?v=__APP_JS_VER__ 这种字面量吐给浏览器
 
 
 # ─── 聊天界面 HTML ─────────────────────────────────────────────────────────
@@ -806,7 +840,7 @@ CHAT_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>创业者工作台</title>
-<link rel="stylesheet" href="/static/app.css?v=20260413a">
+<link rel="stylesheet" href="/static/app.css?v=__APP_CSS_VER__">
 </head>
 <body>
 <header>
@@ -880,7 +914,7 @@ CHAT_HTML = """<!DOCTYPE html>
     <div id="advisor-list" style="display:none;"></div>
   </aside>
 </div>
-<script src="/static/app.js?v=20260413a"></script>
+<script src="/static/app.js?v=__APP_JS_VER__"></script>
 </body>
 </html>
 """
@@ -910,7 +944,10 @@ SETTINGS_MODAL_HTML = """
 async def index():
     # 配置单源：模型名运行时注入（占位符替换，避免 f-string 与 CSS 花括号冲突）
     # 动态读取，保证用户通过 /settings/llm 保存后刷新页面即看到新名，无需重启
-    return CHAT_HTML.replace("__MODEL_NAME__", get_model_name())
+    html = CHAT_HTML.replace("__MODEL_NAME__", get_model_name())
+    # 资源版本号：mtime 动态注入（见 _static_ver），改文件即换 URL，缓存天然失效
+    html = html.replace("__APP_CSS_VER__", _static_ver("app.css"))
+    return html.replace("__APP_JS_VER__", _static_ver("app.js"))
 
 
 @app.get("/health")

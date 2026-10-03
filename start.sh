@@ -35,6 +35,7 @@ if ! "$VENV_PY" -c "from web_server import app; assert app is not None" 2>/tmp/s
 fi
 
 echo "[shangzhu] 启动中... (端口 $PORT, 日志: $LOG)"
+echo "[shangzhu] 提示：服务重启/升级后浏览器请硬刷新一次（Cmd+Shift+R），避免旧前端缓存"
 exec "$VENV_PY" -c "
 import uvicorn
 from web_server import app
