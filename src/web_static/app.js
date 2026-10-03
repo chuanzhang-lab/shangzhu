@@ -155,19 +155,19 @@ async function _loadTasksInner() {
       const div = document.createElement('div'); div.className = 'task-item' + (task.id === currentTaskId ? ' active' : ''); div.dataset.id = task.id;
       div.innerHTML = '<span class="tname"></span><span class="tmenu" title="改名">⋯</span><span class="tdel" title="删除任务">×</span>';
       div.querySelector('.tname').textContent = task.name || '未命名任务';
-      div.querySelector('.tname').addEventListener('click', () => switchTask(task.id));
+      div.querySelector('.tname').addEventListener('click', () => switchTask(task.id).catch(e => reportClientError('switchTask', 'SWITCH_FAILED', e)));
       div.querySelector('.tmenu').addEventListener('click', e => { e.stopPropagation(); taskMenu(task, div); });
       div.querySelector('.tdel').addEventListener('click', e => { e.stopPropagation(); deleteTask(task, div); });
       taskList.appendChild(div); });
     // 刷新后自动恢复最近任务（否则分类按钮无参数状态、真实参数不加载）
     if (!currentTaskId && tasks.length > 0) {
-      switchTask(tasks[0].id);  // /tasks 按 updated_at DESC，第一个是最近任务
+      switchTask(tasks[0].id).catch(e => reportClientError('switchTask', 'SWITCH_FAILED', e));  // /tasks 按 updated_at DESC，第一个是最近任务
     } else if (currentTaskId) {
       // F6：检查当前任务是否已被删除（不在最新列表中）
       const stillExists = tasks.some(task => task.id === currentTaskId);
       if (!stillExists && tasks.length > 0) {
         setToast('⚠️ 当前任务已被删除，已切换到最近任务', '#d97706');
-        switchTask(tasks[0].id);
+        switchTask(tasks[0].id).catch(e => reportClientError('switchTask', 'SWITCH_FAILED', e));
       } else if (!stillExists) {
         // 当前任务被删且无其他任务 → 重置状态
         currentTaskId = null; hasParams = false; lastParams = null;
@@ -183,7 +183,7 @@ async function _loadTasksInner() {
     } else {
       updateCatDisabled(); updateBadges(); updateControls();
     }
-  } catch (e) { console.error('[loadTasks] 失败:', e); setToast('⚠️ 任务列表加载失败，请刷新重试', '#d97706'); } }
+  } catch (e) { reportClientError('loadTasks', 'TASKS_LOAD_FAILED', e); setToast('⚠️ 任务列表加载失败，请刷新重试', '#d97706'); } }
 
 // 空项目引导示例卡（新建任务/切到空任务时复用，保持与首屏一致）
 const EMPTY_STATE_HTML = '<div class="empty" id="empty"><h2>商业建模助手</h2><p>输入你的项目参数，AI 会调用工具给出分析</p><div class="examples">' +
@@ -206,7 +206,7 @@ async function newTask() {
     const r = await fetch('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ name: '新任务' }) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const task = await r.json(); currentTaskId = task.id; ok = true;
-  } catch (e) { console.error('[newTask] 新建任务失败:', e); currentTaskId = null; }
+  } catch (e) { reportClientError('newTask', 'TASK_CREATE_FAILED', e); currentTaskId = null; }
   if (!ok) { setToast('⚠️ 新建任务失败，请重试', '#d97706'); }
   clearChat(); activeTaskUi(); loadTasks(); input.focus();
 }
@@ -227,7 +227,7 @@ async function switchTask(id) {
     // 补挂只会产生「点击必失败」的死按钮（当前会话里没有生成过名为 A 的候选方案）。
     // 应用按钮仅在 send 实时返回 ops_available=true 时挂到当前轮消息上。
     msgs.forEach(m => { addMessage(m.role, m.content, false, 'all'); });
-  } catch (e) { console.warn('[switchTask] 加载消息历史失败:', e.message); }
+  } catch (e) { reportClientError('switchTask', 'HISTORY_LOAD_FAILED', e); }
   input.focus();
 }
 
@@ -242,7 +242,7 @@ async function restoreTaskParams(id) {
       const ts = await r.json();
       const fresh = ts.find(x => x.id === id);
       if (fresh) { tasksCache[id] = fresh; tp = fresh.params || {}; task = fresh; }
-    } catch (e) { console.warn('[restoreTaskParams] 刷新任务缓存失败:', e.message); }
+    } catch (e) { reportClientError('restoreTaskParams', 'CACHE_REFRESH_FAILED', e); }
   }
   hasParams = Object.keys(tp).length > 0;
   lastParams = hasParams ? tp : null;
@@ -338,7 +338,7 @@ async function executeDelete(task, div) {
     await loadTasks();
     setToast('🗑️ 已删除：' + (task.name || '未命名'), '#666');
   } catch (e) {
-    console.error('[executeDelete] 删除失败:', e);
+    reportClientError('executeDelete', 'TASK_DELETE_FAILED', e);
     resetDeleteButton(tdel);
     setToast('⚠️ 删除失败: ' + (e.message || '请重试'), '#d97706');
   }
@@ -639,6 +639,35 @@ function escape(html) { return html.replace(/&/g, '&amp;').replace(/</g, '&lt;')
 
 // F3/F5：轻量 toast 反馈（右上角浮动提示，3s 自动消失）
 let _toastTimer = null;
+
+// ── 前端错误统一上报（M-04/M-06）────────────────────────────────────────────
+// 「降级必有痕 / 异常不吞」前端版：所有 catch-all 必须走这里，console 留痕 +
+// sendBeacon 落服务端 logs/web_server.log（WEBCLIENT 标签），排查不再依赖口述。
+// 节流：同 (stage,code) 60 秒内只报 1 条，防错误风暴打爆日志。
+const _reportSeen = {};
+function reportClientError(stage, code, err) {
+  const msg = (err && (err.message || String(err))) || 'unknown';
+  console.error('[失败于[' + stage + ':' + code + ']]', err || msg);
+  const key = stage + ':' + code;
+  const now = Date.now();
+  if (_reportSeen[key] && now - _reportSeen[key] < 60000) return;
+  _reportSeen[key] = now;
+  const payload = JSON.stringify({
+    stage: String(stage).slice(0, 40),
+    code: String(code).slice(0, 40),
+    message: String(msg).slice(0, 500),
+    page_ver: (typeof window !== 'undefined' && window.__PAGE_VER__) || '0',
+    ts: new Date().toISOString(),
+  });
+  try {
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/client-log', new Blob([payload], { type: 'application/json' }));
+    } else {
+      fetch('/client-log', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: payload, keepalive: true }).catch(() => {});
+    }
+  } catch (_) { /* 上报失败绝不二次打扰用户 */ }
+}
+
 function setToast(msg, color) {
   let el = document.getElementById('toast');
   if (!el) { el = document.createElement('div'); el.id = 'toast'; el.style.cssText = 'position:fixed;top:64px;right:20px;z-index:999;background:#1a1a1a;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.2);max-width:280px;'; document.body.appendChild(el); }
@@ -1062,6 +1091,7 @@ async function send() {
     if (sentTaskId !== currentTaskId) { placeholder.remove(); return; }  // 已切任务，丢弃
     placeholder.classList.remove('streaming');
     const isTimeout = (e && e.name === 'AbortError');
+    reportClientError('chat', isTimeout ? 'CHAT_TIMEOUT' : 'CHAT_NETWORK_ERROR', e);
     setMsgBody(placeholder, '<em style="color:#dc2626">' + (isTimeout ? '请求超时（60s），请重试' : '网络错误: ' + escape(e.message)) + '</em>');
     input.value = text; drafts[currentCat] = text;   // F7：失败保草稿
   }
