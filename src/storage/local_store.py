@@ -556,6 +556,11 @@ def get_store() -> BaseStore:
                 fs.ping()
                 candidate = fs
                 logger.warning(f"已降级本地文件 store：{fs.path}（重启不丢，但非多端共享）")
+                logger.warning(
+                    "孤儿数据提醒：本批任务只写进上面的 JSON 文件；PG 恢复后 get_store() 会"
+                    "切回 PostgreSQL，该文件数据不会自动迁移——请运行 "
+                    "scripts/migrate_json_to_pg.py 搬迁，否则这批数据滞留旧文件（降级必有痕）"
+                )
             except Exception as e:  # noqa: BLE001
                 logger.error(f"本地文件 store 也不可用（{e}），降级内存 store：数据重启即丢！")
 

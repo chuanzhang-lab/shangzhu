@@ -67,3 +67,22 @@
 3. 用户给够参数 → 跳过模板 → 标注「自定义」
 4. 混合业态 → 检测并警告 → 让用户确认
 5. 分析深度由用户控制（快速/详细）
+
+## 工程公约（2026-10-03 四层防线事故复盘，全体模块适用）
+
+1. **降级必有痕**：任何 except 降级/回退路径必须 logger.warning/error 留痕
+   （范本：storage 的 get_store 降级链）。静默降级 = 隐性故障。
+2. **异常不吞**：catch-all 必须给出痕迹——后端 logger 留痕，前端走
+   reportClientError（console `[失败于[阶段:错误码]]` + /client-log 上报）。
+   口径与三档审计见 docs/except-audit-20261003.md。
+3. **每事故一护栏**：每起事故复盘后固化一条护栏测试（命名 `test_*_guard` /
+   `test_*_shadow`），把点状修复升级为面状规则。已有范例：
+   test_appjs_shadow_guard（遮蔽）、test_static_cache_guard（缓存）、
+   test_isolation_guard（测试隔离）、test_no_unawaited_async（无痕失败）、
+   test_copy_drift_guard（双副本漂移）。
+
+## 排障口诀
+
+先分清服务端还是前端：`logs/web_server.log`（服务端异常/降级/WEBCLIENT 前端上报）
+→ 浏览器 console `[失败于[阶段:错误码]]` → 都干净则硬刷新（Cmd+Shift+R）排旧缓存，
+或看「页面版本过旧」横幅。服务重启/升级后习惯性硬刷一次（start.sh 横幅有提示）。
