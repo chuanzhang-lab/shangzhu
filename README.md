@@ -152,6 +152,15 @@ The frontend is a **categorized conversation workbench**: 5 category tabs (All /
 
 Dual log output: `logs/web_server.log` (structured application log, 10 MB × 5 rotations) and `logs/shangzhu.log` (console copy + uvicorn output).
 
+**排障口诀 / Troubleshooting checklist**（问题先分清「服务端还是前端」/ First decide: server-side or front-end）：
+
+1. 先看 `logs/web_server.log`——服务端异常、降级、前端上报（`WEBCLIENT` 标签）都在这里；
+2. 再看浏览器 console 的 `[失败于[阶段:错误码]]` 标记——前端失败会注明阶段（loadTasks / switchTask / chat 等），一眼定位到功能块；
+3. 页面行为怪但两处都干净 → 大概率旧前端缓存：硬刷新（Cmd+Shift+R），或看顶部「页面版本过旧」横幅；
+4. 测试跑完任务列表混入测试数据 → `scripts/clean_test_tasks.py`（默认 dry-run）清理；新版本测试已隔离，正常不再产生。
+
+Check `logs/web_server.log` first (server errors, degradations, `WEBCLIENT` front-end reports), then the browser console `[失败于[stage:code]]` markers to locate the failing feature block. Clean log + weird UI usually means stale front-end cache: hard-refresh (Cmd+Shift+R) or heed the "page version outdated" banner.
+
 ---
 
 ## 配置 / Configuration
