@@ -190,12 +190,17 @@ The two config files that hold credentials/local information have `600` permissi
 
 ```bash
 make sync      # uv sync
-make test      # 全量回归（当前 517 passed） / full regression (currently 517 passed)
+make test      # 全量回归（以实际输出为准；测试自带库隔离，不碰真实数据） / full regression (isolated, never touches real data)
+make lint      # ESLint 前端门禁（no-shadow/no-undef 错误级） / front-end lint gate
 make smoke     # 导入 + /health 结构冒烟（不启服务） / import + /health smoke (no server)
 make compile   # 字节码编译检查 / bytecode compile check
 make start     # 启动（PORT=8081） / start (PORT=8081)
 make health    # curl /health
 ```
+
+**提交门禁 / Commit gate**：CI（GitHub Actions）与本地 pre-commit 均强制 `compile + lint + test` 三件套。本地启用：`git config core.hooksPath .githooks`（首次 clone 后执行一次）。紧急绕过：`SKIP_GATE=1 git commit ...`（CI 仍会拦截）。
+
+CI (GitHub Actions) and the local pre-commit hook both enforce `compile + lint + test`. Enable the hook once after cloning: `git config core.hooksPath .githooks`. Emergency bypass: `SKIP_GATE=1 git commit ...` (CI still gates).
 
 测试覆盖引擎全链路：`router`（意图/参数抽取）→ `session_state`（跨轮 merge）→ `workflow_engine` → `financial_calculator` → `formatter` → `llm_advisor`，以及多轮真实场景对话的端到端 oracle。
 

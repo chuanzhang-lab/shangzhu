@@ -27,8 +27,9 @@ smoke:
 	$(PY) -c "import web_server as w; h=w.app.router.routes; assert any(getattr(r,'path',None)=='/health' for r in h); print('smoke_ok', w.APP_VERSION, w.MODEL_NAME)"
 
 # 门禁：ESLint 错误级 = no-shadow / no-undef（点状事故升级为面状规则）
+# 扫整个 web_static 目录：新增前端文件自动进门禁，不只 app.js
 lint:
-	npx eslint src/web_static/app.js
+	npx eslint src/web_static/
 
 compile:
 	$(PY) -m compileall -q src web_server.py tests

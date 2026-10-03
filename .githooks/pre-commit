@@ -1,0 +1,21 @@
+#!/bin/sh
+# 本地提交门禁（M-07）：与 CI 同款三件套 compile + lint + test。
+# 启用：git config core.hooksPath .githooks（setup.sh / README 已说明）
+# 紧急绕过：SKIP_GATE=1 git commit ...（绕过行为会被 CI 兜住）
+set -e
+
+if [ -n "$SKIP_GATE" ]; then
+  echo "[pre-commit] SKIP_GATE=1 —— 跳过本地门禁（CI 仍会拦截）" >&2
+  exit 0
+fi
+
+echo "[pre-commit] make compile ..."
+make compile
+
+echo "[pre-commit] make lint ..."
+make lint
+
+echo "[pre-commit] make test ..."
+make test
+
+echo "[pre-commit] 门禁通过 ✓"
