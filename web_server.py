@@ -126,7 +126,12 @@ from op_executor import (
 )
 
 # 本地存储层：任务持久化（Task 4 引入）
-from storage.local_store import get_store, note_write_result, store_diagnostics
+from storage.local_store import (
+    StoreUnavailableError,
+    get_store,
+    note_write_result,
+    store_diagnostics,
+)
 
 # ── 配置单源 ──────────────────────────────────────────────────────────────
 # model/endpoint 统一从 config/agent_llm_config.json 读取（经 llm_advisor），
@@ -775,9 +780,14 @@ async def lifespan(app: FastAPI):
     logger.info("Web 服务启动：本地工作台模式（仅引擎层 + Engine Steward）")
     yield
     # R3/R4 修复：服务关闭时释放资源（文件描述符 + 数据库连接）
-    store = get_store()
-    if hasattr(store, 'close'):
-        store.close()
+    # 2026-10-07：容错——STORE_BACKEND=pg 且 PG 已挂时 get_store() 会抛
+    # StoreUnavailableError，关闭路径不该因此再炸一次（退出流程必须干净）。
+    try:
+        store = get_store()
+        if hasattr(store, 'close'):
+            store.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"关闭时释放 store 失败（不影响退出）: {e}")
     for handler in logger.handlers[:]:
         handler.close()
         logger.removeHandler(handler)
@@ -785,6 +795,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="创业者工作台", lifespan=lifespan)
+
+
+@app.exception_handler(StoreUnavailableError)
+async def _store_unavailable_handler(request: Request, exc: StoreUnavailableError):
+    """存储后端不可用 → 503 + 固定文案（加固 E3：错误原文只进日志，不透传前端）。
+
+    `STORE_BACKEND=pg` 档位下这是最可能见到的错误——那档位的语义就是「拒绝降级、
+    明确报错」，所以文案必须给出下一步动作，而不是一句「服务器内部错误」。
+    """
+    logger.error(f"存储不可用（{request.url.path}）: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "ok": False,
+            "error": "数据库不可用，本次操作未执行。请运行 .venv/bin/python3 scripts/doctor.py "
+                     "查看原因与修复命令，然后重试。",
+        },
+    )
 
 # CORS：收紧为白名单，避免任意恶意站点跨站操作。
 # 白名单跟随实际服务端口（PORT 环境变量，默认 8081，与 start.sh / argparse 默认值同源），
@@ -996,6 +1024,7 @@ async def health():
         "llm_configured": has_api_key(),
         "sessions": stats,
         "store_backend": store_backend,
+        "store_mode": diag.get("mode"),
         # ── 存储诊断（存储加固-3，T2/L2/Z3）──────────────────────────────
         # 降级不能只在服务端日志里：用户与前端要能直接看到「数据现在落在哪、
         # 为什么、写成功过没有」。字段全部脱敏（不含凭据）。

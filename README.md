@@ -16,6 +16,24 @@ A local-first financial modeling workbench for micro-entrepreneurs opening a noo
 
 ## 更新说明 / What's New
 
+### `0.3.0` — 存储加固：PG 连接层四道防线 / Storage Hardening
+
+#### 中文
+
+2026-10-07 对存储层做了一次针对性审查（数据安全 / 隐私 / 恢复 / 回退 / 装机引导五问）。本版把「数据不丢」从口号变成可验证属性，并把方向明确为 **PostgreSQL 为唯一主档（不做 SQLite）**：
+
+- **连接层失败预算**：`connect_timeout=5s` / `statement_timeout=10s` / `lock_timeout=5s` + TCP keepalive。此前没有任何超时——PG 半开时一次卡住的查询会永久占住连接锁，全部任务 API 连 `/health` 一起冻死。
+- **一轮对话原子写**：新增 `BaseStore.add_turn()`，PG 单事务写 user + assistant + 参数快照 + 超限裁剪。此前分三次调用（三个独立事务），崩在中间会留下「有问无答 + 参数陈旧」的半回合。
+- **降级可见化**：`/health` 新增 8 个存储诊断字段（后端 / 落点 / 原因 / 孤儿数据 / 写失败次数），页面顶部出现降级横幅；本轮没写进数据库时当场提示——而不是重启后才发现对话少一截。
+- **可验证恢复**：备份改 `-Fc` + 写完即 `pg_restore --list` 校验；新增 `scripts/restore_db.sh`（校验 / 恢复到新库 / 演练 / 强制覆盖四档）与 `make drill`。恢复演练实测：648 任务 / 1471 消息与生产库一致（`docs/restore-drill-20261007.md`）。
+- **装机引导**：新增 `scripts/doctor.py` 环境体检（驱动 / 服务 / 目标库 / 建表权限 / 表结构五层分辨，每层给可粘贴的修复命令）；新增 `STORE_BACKEND=auto|pg|file|memory` 显式档位——`pg` 表示"只要 PG、拒绝降级"。
+- **隐私收口**：`data/`（降级落盘）与 `backups/`（全库快照）进 `.gitignore`，落盘文件 `600`，`/health` 与错误响应不含凭据。
+- 方向决策记录：`docs/decision-storage-pg-20261007.md`（含反方论证、双副本边界与重开条件）。
+
+#### English
+
+A targeted storage-layer review (data safety / privacy / recovery / rollback / install guidance) with PostgreSQL confirmed as the single primary store (no SQLite port). This release adds: connection failure budgets (connect/statement/lock timeouts + TCP keepalive — previously a wedged PG could freeze every task API including `/health`); atomic turn writes (`BaseStore.add_turn()` — one transaction for user + assistant + params + trimming, replacing three autocommit calls that could leave half a turn); degradation visibility (`/health` store diagnostics + a page-top banner + per-request `persist_warning`); verifiable recovery (`pg_dump -Fc` with `pg_restore --list` verification, `restore_db.sh`, `make drill` — rehearsal matched production row counts); install guidance (`scripts/doctor.py` five-layer checks with copy-pasteable fixes, plus an explicit `STORE_BACKEND=auto|pg|file|memory` switch); privacy tightening (`data/` and `backups/` git-ignored, files `600`). Decision record: `docs/decision-storage-pg-20261007.md`.
+
 ### `0.2.0` — 四层防线：事故复盘系统性整改 / Four-Layer Defense
 
 #### 中文
@@ -66,13 +84,13 @@ LLM here is not the calculator — it is the **Engine Steward (read-only collabo
 ```bash
 git clone https://github.com/chuanzhang-lab/shangzhu.git
 cd shangzhu
-bash setup.sh     # 装依赖 + 生成配置 + 初始化数据库(可选) + 跑测试
+bash setup.sh     # 装依赖 + 生成配置 + 存储环境体检 + 初始化数据库 + 跑测试
 ./start.sh        # 启动，默认 http://localhost:8081
 ```
 
-`setup.sh` 会自动：安装 `uv`（如缺失）→ `uv sync` → 生成 `config/agent_llm_config.json` 与 `config/storage.json` → 导入冒烟 → 初始化 PostgreSQL（检测不到则跳过）→ 跑测试。
+`setup.sh` 会自动：安装 `uv`（如缺失）→ `uv sync` → 生成 `config/agent_llm_config.json` 与 `config/storage.json` → 导入冒烟 → 存储环境体检（`scripts/doctor.py`，未通过会给出可粘贴的修复命令）+ 初始化 PostgreSQL → 跑测试。
 
-`setup.sh` automates: install `uv` (if missing) → `uv sync` → generate `config/agent_llm_config.json` and `config/storage.json` → smoke import → initialize PostgreSQL (skipped if not detected) → run tests.
+`setup.sh` automates: install `uv` (if missing) → `uv sync` → generate `config/agent_llm_config.json` and `config/storage.json` → smoke import → storage environment check (`scripts/doctor.py`, prints copy-pasteable fixes) + initialize PostgreSQL → run tests.
 
 可选参数：`--start`（跑完直接启动）、`--no-test`（跳过测试）。
 
@@ -199,13 +217,68 @@ API Key 四级优先级读取 / API key resolution order (highest priority first
 3. macOS Keychain（service=`shangzhu-llm`, account=`api_key`）
 4. 空串（未配置） / empty string (unconfigured)
 
-**持久化 / Persistence** 默认 `postgresql://<系统用户名>@localhost:5432/shangzhu`，可用 `PGDATABASE_URL` 或 `config/storage.json` 的 `db_url` 覆盖。降级链：**PostgreSQL → 本地 JSON 文件 → 内存**，前两级重启不丢。PG 不可用时服务不崩，仅会话在重启后丢失。
+**持久化 / Persistence** 默认 `postgresql://<系统用户名>@localhost:5432/shangzhu`，可用 `PGDATABASE_URL` 或 `config/storage.json` 的 `db_url` 覆盖（三级优先：env → 配置文件 → 内置默认）。三级口径**务必分清**，别把 ② 当成丢数据：
 
-Default persistence: `postgresql://<system-username>@localhost:5432/shangzhu`; overridable via `PGDATABASE_URL` or the `db_url` field in `config/storage.json`. Fallback chain: **PostgreSQL → local JSON file → in-memory**; the first two survive restarts. When PG is unavailable the service does not crash — sessions are simply lost on restart.
+| 档 | 触发 | 数据落在哪 | 重启 | 迁回 |
+|---|---|---|---|---|
+| ① PG 可用 | 默认 | PostgreSQL | 不丢 | — |
+| ② PG 不可用 | 连不上 / 没建库 | `data/local_store.json` | 不丢 | PG 恢复后 `scripts/migrate_json_to_pg.py`（默认 dry-run） |
+| ③ 文件也写不了 | 磁盘 / 权限问题 | 内存 | **丢** | 无（日志 ERROR + 页面红色横幅） |
 
-两个含密钥/本机信息的配置文件均为 `600` 权限且不被 git 跟踪。数据库备份：`./scripts/backup_db.sh shangzhu`（保留最近 7 份）。
+**档位开关 / Backend switch**：`STORE_BACKEND=auto|pg|file|memory`（也可写 `config/storage.json` 的 `backend` 字段）。`auto` 为默认，行为与上表完全一致；`pg` 表示**只要 PG、拒绝降级**（连不上就明确报错并给修复命令，启动前先体检）；`file`/`memory` 是显式选择，会在页面上提示当前模式。当前实际用哪个后端、为什么、有没有写失败——看 `/health` 的 `store_*` 字段，或页面顶部横幅。
 
-The two config files that hold credentials/local information have `600` permissions and are not tracked by git. Database backup: `./scripts/backup_db.sh shangzhu` (keeps the last 7 snapshots).
+Default persistence is `postgresql://<system-username>@localhost:5432/shangzhu`, overridable via `PGDATABASE_URL` or `db_url` in `config/storage.json` (env → config → built-in default). Fallback chain: **PostgreSQL → local JSON file (survives restarts) → in-memory (lost on restart)**. `STORE_BACKEND=auto|pg|file|memory` overrides the chain: `pg` means "PostgreSQL only, never degrade" (fails loudly with a fix command instead of silently writing elsewhere). Whatever backend is active, why, and whether writes are failing is reported by the `store_*` fields of `/health` and a page-top banner.
+
+两个含密钥/本机信息的配置文件均为 `600` 权限且不被 git 跟踪；`data/`（降级落盘）与 `backups/`（全库快照）同样不入库，落盘文件 `600`。
+
+The two config files holding credentials have `600` permissions and are git-ignored; `data/` (fallback store) and `backups/` (full snapshots) are ignored too, and the files themselves are `600`.
+
+**存储运维 / Storage ops**：
+
+```bash
+make doctor         # 环境体检：PG 五层分辨 + 可粘贴的修复命令
+make backup         # 备份到 backups/（-Fc，写完即 pg_restore --list 校验，保留最近 7 份）
+make restore-check  # 校验最新备份可读
+make drill          # 恢复演练：临时库 + 行数核对 + 自动清理（全程不碰生产库）
+make restore        # 从最新备份恢复到一个新库（非破坏性；覆盖生产库用 scripts/restore_db.sh --force）
+```
+
+```bash
+make doctor         # environment check: PG five-layer diagnosis with copy-pasteable fixes
+make backup         # pg_dump -Fc into backups/ (verified right after writing, keeps last 7)
+make restore-check  # verify the newest backup is readable
+make drill          # restore rehearsal into a temp DB with row-count check, then clean up
+make restore        # restore the newest backup into a NEW db (non-destructive)
+```
+
+### PostgreSQL 安装与排障 / PostgreSQL Setup & Troubleshooting
+
+任务数据落在**本机 PostgreSQL**（唯一持久化主档）。装一次即可，之后随服务自启：
+
+```bash
+# macOS
+brew install postgresql@16 && brew services start postgresql@16
+# Debian / Ubuntu
+sudo apt install postgresql && sudo systemctl start postgresql
+# Fedora / RHEL
+sudo dnf install postgresql-server && sudo postgresql-setup --initdb
+```
+
+装完**先验证再启动**：`.venv/bin/python3 scripts/doctor.py`（五层逐项 ✅/❌，❌ 行会直接给出要跑的命令）。
+建库建表：`.venv/bin/python3 scripts/init_db.py`（幂等；服务首次连接也会自动建表，忘记跑也不会静默没表）。
+
+不想装本机服务：`export PGDATABASE_URL=postgresql://<user>@<host>:5432/<db>` 指向已有 PG（容器 / 远程均可）。
+
+| 症状 | 原因 | 处置 |
+|---|---|---|
+| `connection refused` / 页面橙色横幅 | 服务没起（含重启后 `brew services` 未自启） | `brew services start postgresql@16` 或 `sudo systemctl start postgresql`，用 `pg_isready` 复查 |
+| `database "shangzhu" does not exist` | 还没建库 | `.venv/bin/python3 scripts/init_db.py` |
+| `role "xxx" does not exist` | 数据库角色不存在 | `createuser -s $(whoami)` 后重跑 `init_db.py` |
+| `password authentication failed` | 认证方式不是 peer | 用带凭据的 `PGDATABASE_URL`，或写 `~/.pgpass`（`chmod 600`）。**不要把密码放进仓库文件** |
+| 页面红色横幅 | 已降级到内存（文件也写不了） | 立即检查磁盘与 `data/` 权限；此档重启即丢 |
+| 恢复要怎么做 | —— | `make drill` 先演练，确认备份可恢复；真要覆盖生产库用 `./scripts/restore_db.sh --force`（需交互输 `yes`） |
+
+Install PostgreSQL once (commands above), then verify with `scripts/doctor.py` before starting — it reports each layer and prints the exact fix command for anything failing. If you prefer not to run a local server, point `PGDATABASE_URL` at an existing PostgreSQL (container or remote). Data is never lost silently: when PG is unavailable the store falls back to `data/local_store.json` (survives restarts) and the page shows a banner explaining where your data is going.
 
 ---
 

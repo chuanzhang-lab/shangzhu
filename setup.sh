@@ -103,28 +103,22 @@ else
   die "web_server 导入失败（依赖可能不完整），详见上方错误"
 fi
 
-# ── 步骤 5：初始化数据库（可选：PG 不可用时按三级降级，不阻断启动）──────────
+# ── 步骤 5：初始化数据库（体检 → 建库；不通过也不阻断启动）──────────────────
 say "步骤 5/6 初始化数据库（可选）"
-if command -v psql >/dev/null 2>&1 && pg_isready -q 2>/dev/null; then
+if "$VENV_PY" scripts/doctor.py; then
   if "$VENV_PY" scripts/init_db.py 2>/tmp/shangzhu_db.err; then
     ok "PostgreSQL 已初始化（持久化主档就绪）"
   else
-    warn "数据库初始化失败（不影响启动）"
-    warn "详情: $(tail -2 /tmp/shangzhu_db.err 2>/dev/null)"
+    warn "建库失败（不影响启动）：$(tail -2 /tmp/shangzhu_db.err 2>/dev/null)"
     warn "任务将写入 data/local_store.json（重启不丢，但 PG 恢复后需手动迁回）"
   fi
 else
-  warn "未检测到可用的 PostgreSQL 服务，跳过建库"
-  warn "持久化三级降级口径（务必分清，别把②当成丢数据）："
+  warn "环境体检未通过——按上方 ❌ 行给出的 → 命令修复后重跑本脚本即可。"
+  warn "服务仍可启动，持久化三级降级口径（别把②当成丢数据）："
   warn "  ① PostgreSQL 可用 → 任务落 PG（默认主档，可备份/可迁移）"
   warn "  ② PG 不可用       → 任务落 data/local_store.json（重启不丢；PG 恢复后跑 scripts/migrate_json_to_pg.py 迁回）"
   warn "  ③ 文件也写不了    → 内存兜底（重启即丢，日志打 ERROR）"
-  warn "装 PostgreSQL 后重跑本脚本即可："
-  warn "  macOS        : brew install postgresql@16 && brew services start postgresql@16"
-  warn "  Debian/Ubuntu: sudo apt install postgresql && sudo systemctl start postgresql"
-  warn "  Fedora/RHEL  : sudo dnf install postgresql-server && sudo postgresql-setup --initdb"
-  warn "不想装本机服务：设 PGDATABASE_URL 指向已有 PG（容器/远程均可）"
-  warn "环境体检（推荐先跑）：.venv/bin/python3 scripts/doctor.py"
+  warn "服务启动后页面顶部会显示降级横幅；排障见 README「PostgreSQL 安装与排障」。"
 fi
 
 # ── 步骤 6：跑测试 ─────────────────────────────────────────────────────────

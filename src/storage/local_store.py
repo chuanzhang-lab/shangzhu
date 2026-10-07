@@ -720,9 +720,10 @@ class PostgresStore(BaseStore):
 # /health 只暴露类型名——前端与用户对降级一无所知，降级于是成了静默分流。
 _diag: dict = {
     "backend": None,
+    "mode": None,             # store 档位：auto / pg / file / memory（加固 S3）
     "target": None,           # host:port/dbname 或文件路径（不含凭据）
     "degraded": False,
-    "degrade_reason": None,   # PG 不可用时的错误摘要（凭据已打码）
+    "degrade_reason": None,   # PG 不可用时的错误摘要（凭据已打码）/ 显式档位说明
     "file_store_path": None,
     "orphan_tasks": 0,        # PG 就绪、但存在未迁回的降级期数据（加固 L2）
     "write_failures": 0,      # 运行期持久化失败次数（_persist_turn 上报）
@@ -793,6 +794,29 @@ def get_store() -> BaseStore:
         if _store is not None:
             return _store
 
+        # 档位（2026-10-07 加固 S3）：auto（默认，行为与档位出现前完全一致）
+        # / pg（只许 PG，不降级）/ file / memory。非法值直接 ValueError（早失败）。
+        backend = _dburl_mod.resolve_store_backend()
+
+        if backend == "file":
+            fs = LocalFileStore()
+            fs.ping()
+            _store = fs
+            logger.warning(
+                f"STORE_BACKEND=file（显式档位）：跳过 PostgreSQL，任务落 {fs.path}"
+                "（重启不丢；PG 恢复也不会自动切回——要切回请 unset STORE_BACKEND 或设为 pg）"
+            )
+            _fill_diag(_store, backend, "STORE_BACKEND=file（显式选择：跳过 PG）")
+            return _store
+
+        if backend == "memory":
+            _store = MemoryStore()
+            logger.error(
+                "STORE_BACKEND=memory（显式档位）：数据只存内存，重启即丢——仅供演示/测试"
+            )
+            _fill_diag(_store, backend, "STORE_BACKEND=memory（显式选择：数据重启即丢）")
+            return _store
+
         # 1) PostgreSQL：持久化首选
         candidate: Optional[BaseStore] = None
         degrade_reason: Optional[str] = None
@@ -802,6 +826,16 @@ def get_store() -> BaseStore:
             candidate = pg
         except Exception as e:  # noqa: BLE001
             degrade_reason = _dburl_mod.mask_text(str(e))
+            if backend == "pg":
+                # 显式只许 PG：拒绝降级（不把数据写到文件/内存），明确报错并给修复动作
+                msg = (
+                    f"STORE_BACKEND=pg：{degrade_reason}。已按你的显式档位**拒绝降级**"
+                    "（不会把数据悄悄写到文件或内存）。修复："
+                    ".venv/bin/python3 scripts/doctor.py 按输出修复；"
+                    "或改用 STORE_BACKEND=file / 取消该变量（auto 走降级链）。"
+                )
+                logger.error(msg)
+                raise StoreUnavailableError(msg) from e
             # 不套「PostgreSQL 不可用（...）」前缀：StoreUnavailableError 的文案
             # 已自带该措辞，再包一层会变成「PostgreSQL 不可用（PostgreSQL 不可用…）」。
             logger.warning(f"{e}——降级本地文件 store")
@@ -837,15 +871,25 @@ def get_store() -> BaseStore:
                 )
             _diag["orphan_tasks"] = orphans
 
-        _diag.update(
-            backend=type(_store).__name__,
-            target=_describe_target(_store),
-            degraded=not isinstance(_store, PostgresStore),
-            degrade_reason=degrade_reason,
-            file_store_path=(getattr(_store, "path", None)
-                             if isinstance(_store, LocalFileStore) else None),
-        )
+        _fill_diag(_store, backend, degrade_reason)
     return _store
+
+
+def _fill_diag(store: BaseStore, mode: str, reason: Optional[str]) -> None:
+    """登记「当前用哪个后端、为什么、落在哪」（供 /health 与前端横幅）。
+
+    degraded 的口径统一为「不是 PG」——包括用户显式选的 file/memory 档：
+    用户可能几天前设了 STORE_BACKEND 就忘了，横幅提醒是净收益。
+    """
+    _diag.update(
+        backend=type(store).__name__,
+        mode=mode,
+        target=_describe_target(store),
+        degraded=not isinstance(store, PostgresStore),
+        degrade_reason=reason,
+        file_store_path=(getattr(store, "path", None)
+                         if isinstance(store, LocalFileStore) else None),
+    )
 
 
 def reset_store_for_tests() -> None:
@@ -853,6 +897,6 @@ def reset_store_for_tests() -> None:
     global _store
     _store = None
     _diag.update(
-        backend=None, target=None, degraded=False, degrade_reason=None,
+        backend=None, mode=None, target=None, degraded=False, degrade_reason=None,
         file_store_path=None, orphan_tasks=0, write_failures=0, last_write_ok=None,
     )

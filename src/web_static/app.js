@@ -700,6 +700,11 @@ function showStoreBanner(d) {
     (isMemory ? '#b91c1c' : '#d97706') + ';color:#fff;padding:10px 16px;font-size:13px;text-align:center;';
   if (isMemory) {
     el.textContent = '⛔ 数据库不可用，数据只存在内存中——重启即丢。请检查 PostgreSQL（日志 logs/web_server.log）。';
+  } else if (String(d.store_degrade_reason || '').indexOf('显式选择') >= 0) {
+    const where = d.store_file_path ? '（' + d.store_file_path + '）' : '';
+    el.style.background = '#0369a1';
+    el.textContent = 'ℹ️ 当前为显式文件存储模式（STORE_BACKEND=file）：数据落本地文件' + where +
+      '，不会自动迁回 PostgreSQL。要切回 PG：取消 STORE_BACKEND 或设为 pg 后重启服务。';
   } else {
     const where = d.store_file_path ? '（' + d.store_file_path + '）' : '';
     el.textContent = '⚠️ 数据库不可用，数据暂存本地文件' + where +

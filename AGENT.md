@@ -80,9 +80,20 @@
    test_appjs_shadow_guard（遮蔽）、test_static_cache_guard（缓存）、
    test_isolation_guard（测试隔离）、test_no_unawaited_async（无痕失败）、
    test_copy_drift_guard（双副本漂移）。
+4. **备份必可校验、恢复必演练**（2026-10-07 存储加固）：任何「备份 / 导出」都要能当场
+   验证（`pg_restore --list` 列得出目录才算数），恢复路径必须存在且跑过演练（`make drill`）。
+   不可验证的备份 = 纸面承诺。
+5. **降级必须让用户看得见**（2026-10-07）：只写日志不够——「当前哪个后端 / 落在哪 / 为什么」
+   要同时进 `/health`（`store_*` 字段）与页面横幅。日志只有开发者看得到，而「我的数据现在
+   落在哪」是用户必须知道的事。
 
 ## 排障口诀
 
 先分清服务端还是前端：`logs/web_server.log`（服务端异常/降级/WEBCLIENT 前端上报）
 → 浏览器 console `[失败于[阶段:错误码]]` → 都干净则硬刷新（Cmd+Shift+R）排旧缓存，
 或看「页面版本过旧」横幅。服务重启/升级后习惯性硬刷一次（start.sh 横幅有提示）。
+
+存储相关：先跑 `.venv/bin/python3 scripts/doctor.py`（五层分辨 + 可粘贴修复命令）
+→ 看页面顶部降级横幅 → `/health` 的 `store_backend` / `store_degraded` / `store_target` /
+`store_orphan_tasks` / `store_write_failures` 是同一事实的机器可读版本。
+PG 恢复后若曾降级过，记得 `scripts/migrate_json_to_pg.py` 把孤儿数据迁回。

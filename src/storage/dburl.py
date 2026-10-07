@@ -55,6 +55,39 @@ def resolve_db_url() -> str:
     return DEFAULT_DB_URL
 
 
+# store 档位（2026-10-07 加固 S3：把「选择权」补回来）
+#   auto   ← 默认，降级链 PG → 文件 → 内存（行为与本变量出现前完全一致）
+#   pg     ← 只许 PG：连不上就明确报错，**不降级**（要"要么 PG 要么告诉我"的用户用这档）
+#   file   ← 显式跳过 PG，任务直接落 data/local_store.json（重启不丢，不与 PG 同步）
+#   memory ← 显式选择内存（数据重启即丢，仅供演示/测试）
+STORE_BACKENDS = ("auto", "pg", "file", "memory")
+
+
+def resolve_store_backend() -> str:
+    """store 档位：env STORE_BACKEND → config/storage.json 的 backend → auto。
+
+    非法档位名直接 ValueError（早失败）：拼错档位若静默退回 auto，用户会以为
+    自己锁死了 PG，实际却在悄悄降级——正是本变量要消除的那种不确定性。
+    """
+    raw = (os.getenv("STORE_BACKEND") or "").strip().lower()
+    if not raw:
+        config_path = os.path.join(_PROJECT_ROOT, "config", "storage.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            raw = str(cfg.get("backend") or "").strip().lower()
+        except (OSError, json.JSONDecodeError):
+            raw = ""
+    if not raw:
+        return "auto"
+    if raw not in STORE_BACKENDS:
+        raise ValueError(
+            f"未知 store 档位 {raw!r}——允许值：{', '.join(STORE_BACKENDS)}"
+            "（可用 env STORE_BACKEND 或 config/storage.json 的 backend 字段设置）"
+        )
+    return raw
+
+
 def _parts(url: str) -> dict:
     """解析 URI 或 keyword=value 形式（best-effort），返回各字段字符串。
 
@@ -153,6 +186,8 @@ def main(argv=None) -> int:
         print(host_port(url)[0])
     elif "--port" in args:
         print(host_port(url)[1])
+    elif "--backend" in args:
+        print(resolve_store_backend())
     else:
         print(url)
     return 0

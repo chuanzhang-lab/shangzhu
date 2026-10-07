@@ -27,6 +27,15 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 
+# 显式 pg 档位：启动前体检（该档位语义 = 拒绝降级，起不来必须立刻看清原因）
+if [ "${STORE_BACKEND:-auto}" = "pg" ]; then
+    echo "[start] STORE_BACKEND=pg：启动前存储体检（该档位拒绝降级）"
+    if ! "$VENV_PY" "$SCRIPT_DIR/scripts/doctor.py"; then
+        echo "[start] 体检未通过——按上面 → 命令修复后重试；或 unset STORE_BACKEND 走 auto 降级链" >&2
+        exit 1
+    fi
+fi
+
 # 快速导入冒烟
 if ! "$VENV_PY" -c "from web_server import app; assert app is not None" 2>/tmp/shangzhu_start_import.err; then
     echo "[start] 错误：web_server 导入失败，详见 /tmp/shangzhu_start_import.err"
