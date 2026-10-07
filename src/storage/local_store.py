@@ -100,6 +100,22 @@ class BaseStore:
     def close(self) -> None:
         """释放底层资源（如数据库连接）。内存版为空操作。"""
 
+    def _bump_turn(self, task_id: str, turn: int) -> None:
+        """推进任务的 turn 计数（单调不回退）——加固 B（2026-10-08）。
+
+        背景：`tasks.turn` 列自建立以来从未被写过，全表恒为 0（实测 650 行全 0），
+        而回合数实际只存在于 `messages.turn`。任何读 `tasks.turn` 的代码因此
+        拿到错值。内存 / 文件两版在此统一推进；PG 版在 SQL 里用 GREATEST 实现
+        （事务内，语义等价）。
+        """
+        task = getattr(self, "_tasks", {}).get(task_id)
+        if task is None:
+            return
+        try:
+            task["turn"] = max(int(task.get("turn") or 0), int(turn or 0))
+        except (TypeError, ValueError):
+            return  # turn 列异常值不阻断本轮落盘
+
 
 # 单任务消息数上限，防止长期运行内存无限增长
 _MAX_MESSAGES_PER_TASK = 500
@@ -179,6 +195,9 @@ class MemoryStore(BaseStore):
         self.add_message(task_id, "assistant", assistant_msg, turn)
         if params is not None:
             self.update_params(task_id, params)
+        # 加固 B（2026-10-08）：tasks.turn 此前从不更新 → 全表恒 0（死列），
+        # 回合数只存在于 messages.turn。三个 store 统一推进，且单调不回退。
+        self._bump_turn(task_id, turn)
 
     def get_messages(self, task_id: str) -> List[dict]:
         return [dict(m) for m in self._msgs.get(task_id, [])]
@@ -363,6 +382,7 @@ class LocalFileStore(BaseStore):
                 return
             prev_msgs = list(self._msgs[task_id])
             prev_params = dict((self._tasks.get(task_id) or {}).get("params") or {})
+            prev_turn = (self._tasks.get(task_id) or {}).get("turn", 0)
             try:
                 self._msgs[task_id].append({"role": "user", "content": user_msg, "turn": turn})
                 self._msgs[task_id].append({"role": "assistant", "content": assistant_msg, "turn": turn})
@@ -372,11 +392,14 @@ class LocalFileStore(BaseStore):
                 if params is not None and task_id in self._tasks:
                     self._tasks[task_id]["params"] = dict(params or {})
                     self._tasks[task_id]["updated_at"] = time.time()
+                # 加固 B：与内存/PG 版一致推进 tasks.turn（失败时随 prev_params 回滚）
+                self._bump_turn(task_id, turn)
                 self._flush()
             except Exception:
                 self._msgs[task_id] = prev_msgs
                 if task_id in self._tasks:
                     self._tasks[task_id]["params"] = prev_params
+                    self._tasks[task_id]["turn"] = prev_turn
                 raise
             _log_trim(task_id, dropped)
 
@@ -689,6 +712,12 @@ class PostgresStore(BaseStore):
                     "UPDATE tasks SET params = %s, updated_at = now() WHERE id = %s",
                     (json.dumps(params or {}), task_id),
                 )
+            # 加固 B（2026-10-08）：tasks.turn 此前从不更新 → 全表恒 0（死列）。
+            # GREATEST 保证单调：旧回合重放/乱序不会把计数打回去。
+            cur.execute(
+                "UPDATE tasks SET turn = GREATEST(COALESCE(turn, 0), %s) WHERE id = %s",
+                (turn, task_id),
+            )
             return _trim_messages(cur, task_id)
 
         _log_trim(task_id, self._execute(_run, transaction=True) or 0)
