@@ -236,7 +236,7 @@ The two config files holding credentials have `600` permissions and are git-igno
 **存储运维 / Storage ops**：
 
 ```bash
-make doctor         # 环境体检：PG 五层分辨 + 可粘贴的修复命令
+make doctor         # 环境体检：PG 六层分辨（含备份新鲜度）+ 可粘贴的修复命令
 make backup         # 备份到 backups/（-Fc，写完即 pg_restore --list 校验，保留最近 7 份）
 make restore-check  # 校验最新备份可读
 make drill          # 恢复演练：临时库 + 行数核对 + 自动清理（全程不碰生产库）
@@ -244,7 +244,7 @@ make restore        # 从最新备份恢复到一个新库（非破坏性；覆�
 ```
 
 ```bash
-make doctor         # environment check: PG five-layer diagnosis with copy-pasteable fixes
+make doctor         # environment check: PG six-layer diagnosis with copy-pasteable fixes
 make backup         # pg_dump -Fc into backups/ (verified right after writing, keeps last 7)
 make restore-check  # verify the newest backup is readable
 make drill          # restore rehearsal into a temp DB with row-count check, then clean up
@@ -264,7 +264,9 @@ sudo apt install postgresql && sudo systemctl start postgresql
 sudo dnf install postgresql-server && sudo postgresql-setup --initdb
 ```
 
-装完**先验证再启动**：`.venv/bin/python3 scripts/doctor.py`（五层逐项 ✅/❌，❌ 行会直接给出要跑的命令）。
+装完**先验证再启动**：`.venv/bin/python3 scripts/doctor.py`（六层逐项 ✅/⚠️/❌，❌ 行会直接给出要跑的命令）。
+
+> 完整数据库说明（三级口径 / 运维命令 / 定时备份 / 排障表 / 自检清单）见 **[`docs/DATABASE.md`](docs/DATABASE.md)**。
 建库建表：`.venv/bin/python3 scripts/init_db.py`（幂等；服务首次连接也会自动建表，忘记跑也不会静默没表）。
 
 不想装本机服务：`export PGDATABASE_URL=postgresql://<user>@<host>:5432/<db>` 指向已有 PG（容器 / 远程均可）。
