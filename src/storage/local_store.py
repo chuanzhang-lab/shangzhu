@@ -100,6 +100,23 @@ class BaseStore:
     def close(self) -> None:
         """释放底层资源（如数据库连接）。内存版为空操作。"""
 
+    def _sync_industry(self, task_id: str, params: Optional[dict]) -> None:
+        """把 params 里的行业同步到 tasks.industry 列（只增不抹）。
+
+        同类死列（2026-10-08，与 turn 同一轮扫描发现）：`tasks.industry` 自建立
+        以来从不写入，实测 651 行全 NULL，而行业其实一直躺在 params JSON 里。
+        语义选择：**只增不抹**——params 没带 industry 的回合（如只改租金）不覆盖
+        已定值，否则一次无关改动就会把行业清空。
+        """
+        if not isinstance(params, dict):
+            return
+        industry = params.get("industry")
+        if not industry:
+            return
+        task = getattr(self, "_tasks", {}).get(task_id)
+        if task is not None:
+            task["industry"] = industry
+
     def _bump_turn(self, task_id: str, turn: int) -> None:
         """推进任务的 turn 计数（单调不回退）——加固 B（2026-10-08）。
 
@@ -174,6 +191,7 @@ class MemoryStore(BaseStore):
         if task_id in self._tasks:
             self._tasks[task_id]["params"] = dict(params or {})
             self._tasks[task_id]["updated_at"] = time.time()
+            self._sync_industry(task_id, params)   # 加固 B2：industry 落库
 
     def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
         if task_id in self._msgs:
@@ -352,6 +370,7 @@ class LocalFileStore(BaseStore):
             if task_id in self._tasks:
                 self._tasks[task_id]["params"] = dict(params or {})
                 self._tasks[task_id]["updated_at"] = time.time()
+                self._sync_industry(task_id, params)   # 加固 B2：industry 落库
                 self._flush()
 
     def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
@@ -392,6 +411,7 @@ class LocalFileStore(BaseStore):
                 if params is not None and task_id in self._tasks:
                     self._tasks[task_id]["params"] = dict(params or {})
                     self._tasks[task_id]["updated_at"] = time.time()
+                    self._sync_industry(task_id, params)     # 加固 B2
                 # 加固 B：与内存/PG 版一致推进 tasks.turn（失败时随 prev_params 回滚）
                 self._bump_turn(task_id, turn)
                 self._flush()
@@ -672,9 +692,11 @@ class PostgresStore(BaseStore):
         ))
 
     def update_params(self, task_id: str, params: dict) -> None:
+        # 加固 B2：顺带同步 industry（只增不抹：params 没带行业时保留已定值）
         self._execute(lambda cur: cur.execute(
-            "UPDATE tasks SET params = %s, updated_at = now() WHERE id = %s",
-            (json.dumps(params or {}), task_id),
+            "UPDATE tasks SET params = %s, industry = COALESCE(%s, industry), "
+            "updated_at = now() WHERE id = %s",
+            (json.dumps(params or {}), (params or {}).get("industry"), task_id),
         ))
 
     def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
@@ -708,9 +730,11 @@ class PostgresStore(BaseStore):
                 (task_id, assistant_msg, turn),
             )
             if params is not None:
+                # 加固 B2：industry 同事务落库（COALESCE = 只增不抹）
                 cur.execute(
-                    "UPDATE tasks SET params = %s, updated_at = now() WHERE id = %s",
-                    (json.dumps(params or {}), task_id),
+                    "UPDATE tasks SET params = %s, industry = COALESCE(%s, industry), "
+                    "updated_at = now() WHERE id = %s",
+                    (json.dumps(params or {}), (params or {}).get("industry"), task_id),
                 )
             # 加固 B（2026-10-08）：tasks.turn 此前从不更新 → 全表恒 0（死列）。
             # GREATEST 保证单调：旧回合重放/乱序不会把计数打回去。

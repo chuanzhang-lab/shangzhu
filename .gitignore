@@ -86,3 +86,6 @@ backups/
 
 # ── 测试临时目录（沙箱环境指定 basetemp 时用）──────────────
 .pytest_tmp
+
+.pytest_tmp
+.ptmp*

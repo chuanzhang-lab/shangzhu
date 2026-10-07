@@ -96,10 +96,19 @@ launchctl list | grep shangzhu      # 确认已加载
 
 `tasks.turn` 记录该任务进行到第几轮；`messages.turn` 记录每条消息属于第几轮。
 
-2026-10-08 前，`add_turn` **只写 `messages.turn`，从不更新 `tasks.turn`**——
-实测 650 行全部恒为 0（死列），读该列的代码拿到的是错值。现已修：三个 store
-（内存 / 文件 / PG）统一推进，PG 侧用 `GREATEST` 保证**单调不回退**；存量用
-`scripts/backfill_task_turn.py` 回填（幂等，本次回填 131 行）。
+2026-10-08 前，两列都是**只定义、从不写**的死列（同类问题）：
+
+| 列 | 修复前实测 | 真值其实在哪 | 现在 |
+|---|---|---|---|
+| `tasks.turn` | 650 行恒为 0 | `messages.turn` | 三 store 统一推进；PG 侧 `GREATEST` 保证**单调不回退**；存量回填 131 行 |
+| `tasks.industry` | 651 行全 NULL | `params->>'industry'` | 从 params 同步落库，**只增不抹**（params 没带行业时不覆盖已定值）；存量回填 30 行 |
+
+两列合用一个幂等脚本（默认预演，改数据前先 `make backup`）：
+
+```bash
+.venv/bin/python3 scripts/backfill_task_columns.py            # 预演
+.venv/bin/python3 scripts/backfill_task_columns.py --apply     # 写入（再跑应为 0 行）
+```
 
 ---
 

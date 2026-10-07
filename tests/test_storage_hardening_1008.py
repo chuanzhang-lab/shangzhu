@@ -50,6 +50,35 @@ def test_add_turn_turn_never_regresses(tmp_path):
     assert store.get_task(task["id"])["turn"] == 3, "turn 必须单调不回退"
 
 
+# ── B2：tasks.industry 从 params 落库（同类死列）───────────────────────
+def test_add_turn_sets_industry_from_params(tmp_path):
+    """params 里带了行业 → tasks.industry 必须落库（此前 651 行全 NULL）。"""
+    store = LocalFileStore(path=str(tmp_path / "store.json"))
+    task = store.create_task(name="industry-检查")
+    assert task["industry"] is None
+
+    store.add_turn(task["id"], "开牛肉面店", "已记录",
+                   params={"industry": "餐饮", "monthly_rent": 8000}, turn=1)
+    assert store.get_task(task["id"])["industry"] == "餐饮"
+
+
+def test_update_params_sets_industry(tmp_path):
+    """update_params 路径同样要同步 industry。"""
+    store = LocalFileStore(path=str(tmp_path / "store.json"))
+    task = store.create_task(name="industry-update")
+    store.update_params(task["id"], {"industry": "零售", "monthly_rent": 3000})
+    assert store.get_task(task["id"])["industry"] == "零售"
+
+
+def test_industry_not_clobbered_by_params_without_it(tmp_path):
+    """params 没带 industry 时，已有值不得被清空（只增不抹）。"""
+    store = LocalFileStore(path=str(tmp_path / "store.json"))
+    task = store.create_task(name="industry-keep")
+    store.add_turn(task["id"], "a", "b", params={"industry": "餐饮"}, turn=1)
+    store.add_turn(task["id"], "c", "d", params={"monthly_rent": 9000}, turn=2)
+    assert store.get_task(task["id"])["industry"] == "餐饮", "无 industry 的回合不得抹掉已定值"
+
+
 # ── A：备份新鲜度 ────────────────────────────────────────────────────────
 def test_backup_status_no_backup_is_stale(tmp_path):
     """一份备份都没有 → 明确 stale（这是最危险的防丢状态）。"""
