@@ -20,11 +20,35 @@ import os
 import re
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FAMILY = os.path.dirname(ROOT)  # shangyezhushou/
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # …/shangzhu
+FAMILY = os.path.dirname(ROOT)
+
+
+def _find_en_copy() -> str:
+    """定位英文副本目录。
+
+    2026-10-07 修正：原先硬取 `<父目录>/shangzhu-en`。本仓若不在 shangyezhushou/
+    之下（例如被放到 ~/Desktop/shangzhu），该路径不存在——结果是把「找不到副本
+    目录」报成「shangzhu-en 11 条不变量里 8 条未满足」的假信号（正是本仓一直在
+    治理的那类误导）。改为按已知布局探测 + 环境变量兜底，找不到就明说找不到。
+    """
+    candidates = [
+        os.environ.get("SHANGZHU_EN_PATH", ""),
+        os.path.join(FAMILY, "shangzhu-en"),                 # 同目录并列（family 布局）
+        os.path.join(FAMILY, "shangyezhushou", "shangzhu-en"),  # 常见实际布局
+        os.path.expanduser("~/Desktop/shangyezhushou/shangzhu-en"),
+    ]
+    for path in candidates:
+        if path and os.path.isdir(path):
+            return path
+    return ""
+
+
+_EN_COPY = _find_en_copy()
+
 COPIES = {
     "shangzhu": ROOT,
-    "shangzhu-en": os.path.join(FAMILY, "shangzhu-en"),
+    "shangzhu-en": _EN_COPY,
 }
 
 KEY_FILES = ["web_server.py", "src/web_static/app.js", "tests/conftest.py", "Makefile"]
@@ -172,18 +196,25 @@ def main():
             print(f"  {rel:<28} {hs[0]} / {hs[1]}  [{status}]")
 
     violations = [(name, detail) for name, (ok, detail) in results["shangzhu"].items() if not ok]
-    drifts = [(name, detail) for name, (ok, detail) in results["shangzhu-en"].items() if not ok]
 
-    if drifts:
-        print("\n[DRIFT 警告] shangzhu-en 未满足（范围外，仅报告，不阻塞）：")
-        for name, detail in drifts:
-            print(f"  - {name}: {detail}")
+    if not _EN_COPY:
+        # 找不到副本目录 ≠ 副本不达标：不许把"没对比"报成"未满足"（假信号）
+        print("\n[副本未找到] 未能定位 shangzhu-en 目录——跳过 EN 对比（不计入不合规）。")
+        print("  可用 SHANGZHU_EN_PATH=/path/to/shangzhu-en 显式指定；")
+        print("  或确认仓库是否仍与其并列（本仓 4 层防线的移植源）。")
+    else:
+        drifts = [(name, detail) for name, (ok, detail) in results["shangzhu-en"].items() if not ok]
+        if drifts:
+            print(f"\n[DRIFT 警告] shangzhu-en（{_EN_COPY}）未满足（范围外，仅报告，不阻塞）：")
+            for name, detail in drifts:
+                print(f"  - {name}: {detail}")
+
     if violations:
         print("\n[违规] shangzhu 未满足（必须修复）：")
         for name, detail in violations:
             print(f"  - {name}: {detail}")
         return 1
-    print("\nshangzhu 全部不变量满足 ✓（shangzhu-en drift 见上方警告）")
+    print("\nshangzhu 全部不变量满足 ✓")
     return 0
 
 
