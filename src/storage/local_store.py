@@ -38,6 +38,15 @@ from typing import List, Optional
 # 双通道 handler——降级原因必须能在日志文件里查到，不能只走 stderr 的 lastResort。
 logger = logging.getLogger("web.local_store")
 
+
+class StoreUnavailableError(RuntimeError):
+    """存储后端不可用（连接建立失败，或语句执行中连接失效且**不可安全重试**）。
+
+    2026-10-07 加固（Z2）：把「连接层不可用」从裸的 OperationalError 里分离出来，
+    调用方据此区分「稍后重试可能成功」与「请求本身有问题」。错误原文只进日志
+    （web_server 侧统一固定文案回客户端），不透传给用户。
+    """
+
 # 注意：psycopg 不在模块顶层导入。
 # 顶层 import psycopg 会让「最小依赖」声明失真——未装 Postgres 驱动时 import 即崩。
 # 改为在 PostgresStore 内部延迟导入，保证无驱动时服务仍能降级启动。
@@ -64,6 +73,19 @@ class BaseStore:
     def add_message(self, task_id: str, role: str, content: str, turn: int = 0) -> None:
         raise NotImplementedError
 
+    def add_turn(self, task_id: str, user_msg: str, assistant_msg: str,
+                 params: Optional[dict] = None, turn: int = 0) -> None:
+        """原子写入一轮对话：user 消息 + assistant 消息 + params 快照。
+
+        2026-10-07 加固（L1/T1）：此前调用方分三次调 store（2×add_message +
+        update_params），而储存实现是 autocommit——三次各自成事务，崩在中间
+        就留下「有问无答 + params 陈旧」的半回合。把事务边界收进契约层，
+        调用方不必（也无法）自己表达。
+
+        实现约定：三者全写或全不写；params=None 表示本轮不改参数快照。
+        """
+        raise NotImplementedError
+
     def get_messages(self, task_id: str) -> List[dict]:
         raise NotImplementedError
 
@@ -76,6 +98,19 @@ class BaseStore:
 
 # 单任务消息数上限，防止长期运行内存无限增长
 _MAX_MESSAGES_PER_TASK = 500
+
+
+def _log_trim(task_id: str, dropped: int) -> None:
+    """消息裁剪必须留痕（Z3，2026-10-07 加固）。
+
+    裁剪曾是三条静默丢数据路径里唯一完全无日志的一条：超过上限的最旧消息
+    被删掉，用户与日志都无从知晓。工程公约「降级必有痕」覆盖此处。
+    """
+    if dropped:
+        logger.warning(
+            f"任务 {task_id} 消息数超上限 {_MAX_MESSAGES_PER_TASK}，"
+            f"已裁剪最旧 {dropped} 条（不再落盘）"
+        )
 
 
 class MemoryStore(BaseStore):
@@ -124,8 +159,21 @@ class MemoryStore(BaseStore):
             self._msgs[task_id].append(
                 {"role": role, "content": content, "turn": turn}
             )
-            if len(self._msgs[task_id]) > _MAX_MESSAGES_PER_TASK:
+            dropped = max(0, len(self._msgs[task_id]) - _MAX_MESSAGES_PER_TASK)
+            if dropped:
                 self._msgs[task_id] = self._msgs[task_id][-_MAX_MESSAGES_PER_TASK:]
+                _log_trim(task_id, dropped)
+
+    def add_turn(self, task_id: str, user_msg: str, assistant_msg: str,
+                 params: Optional[dict] = None, turn: int = 0) -> None:
+        """原子写一轮（内存版：三次 dict 操作之间无 I/O，不存在半回合）。"""
+        if task_id not in self._msgs:
+            logger.warning(f"add_turn 目标任务不存在，本轮未入内存 store: {task_id}")
+            return
+        self.add_message(task_id, "user", user_msg, turn)
+        self.add_message(task_id, "assistant", assistant_msg, turn)
+        if params is not None:
+            self.update_params(task_id, params)
 
     def get_messages(self, task_id: str) -> List[dict]:
         return [dict(m) for m in self._msgs.get(task_id, [])]
@@ -280,9 +328,44 @@ class LocalFileStore(BaseStore):
                 self._msgs[task_id].append(
                     {"role": role, "content": content, "turn": turn}
                 )
-                if len(self._msgs[task_id]) > _MAX_MESSAGES_PER_TASK:
+                dropped = max(0, len(self._msgs[task_id]) - _MAX_MESSAGES_PER_TASK)
+                if dropped:
                     self._msgs[task_id] = self._msgs[task_id][-_MAX_MESSAGES_PER_TASK:]
                 self._flush()
+                _log_trim(task_id, dropped)
+
+    def add_turn(self, task_id: str, user_msg: str, assistant_msg: str,
+                 params: Optional[dict] = None, turn: int = 0) -> None:
+        """原子写一轮（文件版：整轮改完只 _flush 一次，失败回滚内存态）。
+
+        对照旧路径（add_message ×2 + update_params 各 _flush 一次）：崩在第 2 次
+        会留下「有问无答」的文件，且第 3 次未执行时 params 快照与消息不匹配。
+
+        全不写：落盘抛错（如 params 不可 JSON 序列化）时把内存缓存回滚到改动前，
+        再抛出——否则内存与磁盘会静默分叉，且此后每次 _flush 都失败。
+        """
+        with self._lock:
+            if task_id not in self._msgs:
+                logger.warning(f"add_turn 目标任务不存在，本轮未入文件 store: {task_id}")
+                return
+            prev_msgs = list(self._msgs[task_id])
+            prev_params = dict((self._tasks.get(task_id) or {}).get("params") or {})
+            try:
+                self._msgs[task_id].append({"role": "user", "content": user_msg, "turn": turn})
+                self._msgs[task_id].append({"role": "assistant", "content": assistant_msg, "turn": turn})
+                dropped = max(0, len(self._msgs[task_id]) - _MAX_MESSAGES_PER_TASK)
+                if dropped:
+                    self._msgs[task_id] = self._msgs[task_id][-_MAX_MESSAGES_PER_TASK:]
+                if params is not None and task_id in self._tasks:
+                    self._tasks[task_id]["params"] = dict(params or {})
+                    self._tasks[task_id]["updated_at"] = time.time()
+                self._flush()
+            except Exception:
+                self._msgs[task_id] = prev_msgs
+                if task_id in self._tasks:
+                    self._tasks[task_id]["params"] = prev_params
+                raise
+            _log_trim(task_id, dropped)
 
     def get_messages(self, task_id: str) -> List[dict]:
         with self._lock:
@@ -309,6 +392,38 @@ class LocalFileStore(BaseStore):
 # 默认走本机当前用户名的免密 peer 连接（与 README「<系统用户名>」口径一致），
 # 可被 PGDATABASE_URL / config/storage.json 的 db_url 覆盖。
 _DEFAULT_DB_URL = f"postgresql://{getpass.getuser()}@localhost:5432/shangzhu"
+
+# ── 连接层失败预算（2026-10-07 加固 S1/Z1）────────────────────────────────
+# 缺这三条超时时，PG 半开/wedged 会让一次卡住的查询永久占住 _conn_lock，
+# 全部任务 API 连 /health 一起冻死——本地单用户场景下唯一能把「部分失败」
+# 放大成「整体不可用」的点。
+_CONNECT_TIMEOUT_S = 5           # 建立连接上限：PG 不可达时不再无限等（libpq 默认可到 75s+）
+_STATEMENT_TIMEOUT_MS = 10_000   # 单条 SQL 上限：卡住的查询必须自己死掉并释放锁
+_LOCK_TIMEOUT_MS = 5_000         # 等表锁上限
+_IDLE_TX_TIMEOUT_MS = 30_000     # 事务闲置上限：漏掉的 BEGIN 不占着快照不放
+
+
+def _pg_connect_params(url: str) -> dict:
+    """构造 psycopg.connect 的失败预算参数（超时 + TCP keepalive）。
+
+    DSN 里已显式给出的同名参数一律尊重、不覆盖——既避免与用户配置打架，
+    也绕开 libpq 重复键的取值歧义（libpq 遇到重复键只认第一个）。
+    """
+    params: dict = {}
+    low = url.lower()
+    if "connect_timeout" not in low:
+        params["connect_timeout"] = _CONNECT_TIMEOUT_S
+    if "options=" not in low:
+        params["options"] = (
+            f"-c statement_timeout={_STATEMENT_TIMEOUT_MS} "
+            f"-c lock_timeout={_LOCK_TIMEOUT_MS} "
+            f"-c idle_in_transaction_session_timeout={_IDLE_TX_TIMEOUT_MS}"
+        )
+    if "keepalives" not in low:
+        params.update(
+            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+        )
+    return params
 
 
 # ── 表结构（DDL 单源）────────────────────────────────────────────────────
@@ -371,16 +486,34 @@ def _row_to_task(row) -> dict:
     }
 
 
+def _trim_messages(cur, task_id: str) -> int:
+    """裁剪单任务超额的最旧消息，返回删除条数（0 = 未触发裁剪）。
+
+    R2 修复（单任务上限 500，防 messages 表无限增长）。2026-10-07 加固 Z3：
+    返回条数供调用方留痕——裁剪曾是三条静默丢数据路径里唯一零日志的一条。
+    """
+    cur.execute(
+        "DELETE FROM messages WHERE task_id = %s AND id NOT IN ("
+        "SELECT id FROM messages WHERE task_id = %s "
+        "ORDER BY id DESC LIMIT %s)",
+        (task_id, task_id, _MAX_MESSAGES_PER_TASK),
+    )
+    return cur.rowcount or 0
+
+
 class PostgresStore(BaseStore):
     """psycopg3 实现，落盘本机 PostgreSQL（持久化首选）。
 
-    使用单连接 + autocommit（本地单用户够用，不做连接池）。相比早期版本有三处加固：
+    使用单连接 + autocommit（本地单用户够用，不做连接池）。相比早期版本有五处加固：
 
     1. **懒连接**：`__init__` 只存 URL，不建连接——避免「服务启动顺序」与
        「PG 临时不可达」互相纠缠，也让 `get_store()` 能靠 `ping()` 真正验证可用性。
-    2. **断线自愈**：每次 SQL 经 `_execute`，遇到 OperationalError / InterfaceError
-       自动重建连接重试一次。PG 重启后下一个请求即恢复，不必重启工作台。
-    3. **幂等建表**：首次连上时执行 `SCHEMA_SQL`（CREATE IF NOT EXISTS），
+    2. **失败预算**：连接/语句/锁三重超时 + TCP keepalive（`_pg_connect_params`）。
+       没有它，一次卡住的查询会永久占住 `_conn_lock`，全站（含 /health）一起冻。
+    3. **重试分读写**：连接没建立就失败→无条件重试一次；语句已发出后只有读重试，
+       写不重试（避免「提交成功但响应丢失」被重放成重复消息）。
+    4. **原子回合**：`add_turn` 单事务写 user + assistant + params 快照 + 裁剪。
+    5. **幂等建表**：首次连上时执行 `SCHEMA_SQL`（CREATE IF NOT EXISTS），
        消除「忘了跑 scripts/init_db.py 就静默没表」的失败模式。
     """
 
@@ -397,7 +530,10 @@ class PostgresStore(BaseStore):
         self._conn_lock = threading.Lock()
 
     def _connect(self) -> None:
-        self._conn = self._psycopg.connect(self.url, autocommit=True)
+        # 失败预算（超时 / TCP keepalive）见 _pg_connect_params；DSN 显式值优先。
+        self._conn = self._psycopg.connect(
+            self.url, autocommit=True, **_pg_connect_params(self.url)
+        )
         if not self._schema_ready:
             with self._conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
@@ -411,31 +547,53 @@ class PostgresStore(BaseStore):
                 pass
             self._conn = None
 
-    def _execute(self, fn):
-        """执行一段以 cursor 为参数的 SQL；连接失效时重连后重试一次。
+    def _execute(self, fn, *, retry_statement: bool = False, transaction: bool = False):
+        """执行一段以 cursor 为参数的 SQL。
 
         审查修复 F9：全程持连接锁，串行化所有 SQL（含断线重连），
         防止多线程共享单连接交错执行。本地单用户量级锁竞争可忽略。
+
+        重试语义（2026-10-07 加固 Z2）——「安全重试」与「可能已提交」必须分开：
+        - 连接还没建立就失败：语句肯定没发出去 → 无条件重试一次（PG 未起/刚重启
+          这类最常见故障走这条）；
+        - 语句已发出后失败：读幂等（retry_statement=True）→ 重试安全；
+          写（默认 False）→ **不重试**。提交成功但响应丢失时重试会重复插入
+          （消息翻倍 / 重复任务），宁可抛 StoreUnavailableError 让用户重试。
+        - transaction=True：整段 fn 包进一个事务（多语句写的原子性，加固 L1）。
+
+        失败一律收敛为 StoreUnavailableError（错误原文只进日志）。
         """
         last_err: Optional[Exception] = None
+        conn_was_down = True
         with self._conn_lock:
             for attempt in (0, 1):
+                conn_was_down = self._conn is None or self._conn.closed
                 try:
-                    if self._conn is None or self._conn.closed:
+                    if conn_was_down:
                         self._connect()
+                    if transaction:
+                        with self._conn.transaction():
+                            with self._conn.cursor() as cur:
+                                return fn(cur)
                     with self._conn.cursor() as cur:
                         return fn(cur)
                 except (self._psycopg.OperationalError,
                         self._psycopg.InterfaceError) as e:
                     last_err = e
                     self._drop_conn()
-                    if attempt == 0:
+                    if attempt == 0 and (conn_was_down or retry_statement):
                         logger.warning(f"PG 连接失效，重连重试: {e}")
-            raise last_err  # type: ignore[misc]
+                        continue
+                    break
+        raise StoreUnavailableError(
+            "PostgreSQL 不可用（"
+            + ("连接建立失败" if conn_was_down else "语句执行中连接失效")
+            + f"）：{last_err}"
+        ) from last_err
 
     def ping(self) -> None:
         """连通性自检（含幂等建表）。构造后调用一次，确认后端真能用。"""
-        self._execute(lambda cur: cur.execute("SELECT 1"))
+        self._execute(lambda cur: cur.execute("SELECT 1"), retry_statement=True)
 
     def create_task(self, name: str) -> dict:
         tid = str(uuid.uuid4())
@@ -468,7 +626,7 @@ class PostgresStore(BaseStore):
             )
             return cur.fetchall()
 
-        return [_row_to_task(r) for r in self._execute(_run)]
+        return [_row_to_task(r) for r in self._execute(_run, retry_statement=True)]
 
     def get_task(self, task_id: str) -> Optional[dict]:
         def _run(cur):
@@ -479,7 +637,7 @@ class PostgresStore(BaseStore):
             )
             return cur.fetchone()
 
-        row = self._execute(_run)
+        row = self._execute(_run, retry_statement=True)
         return _row_to_task(row) if row else None
 
     def rename_task(self, task_id: str, name: str) -> None:
@@ -500,16 +658,38 @@ class PostgresStore(BaseStore):
                 "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, %s, %s, %s)",
                 (task_id, role, content, turn),
             )
-            # R2 修复：与 MemoryStore/LocalFileStore 对齐，单任务消息上限 500，
-            # 超限删除最旧消息，防 messages 表无限增长（磁盘 + 全量读劣化）
-            cur.execute(
-                "DELETE FROM messages WHERE task_id = %s AND id NOT IN ("
-                "SELECT id FROM messages WHERE task_id = %s "
-                "ORDER BY id DESC LIMIT %s)",
-                (task_id, task_id, _MAX_MESSAGES_PER_TASK),
-            )
+            # R2：单任务消息上限 500，超限删最旧。加固 L1：INSERT 与裁剪 DELETE
+            # 收进同一事务——旧版两语句各自 autocommit，崩在中间会留下
+            # 「已插入但未裁剪」的超限状态。
+            return _trim_messages(cur, task_id)
 
-        self._execute(_run)
+        _log_trim(task_id, self._execute(_run, transaction=True) or 0)
+
+    def add_turn(self, task_id: str, user_msg: str, assistant_msg: str,
+                 params: Optional[dict] = None, turn: int = 0) -> None:
+        """原子写一轮（PG 版：单事务内 INSERT user + INSERT assistant + UPDATE params + 裁剪）。
+
+        2026-10-07 加固 L1/T1：此前调用方三次独立调用 = 三个事务，崩在中间留下
+        「有问无答 + params 陈旧」的半回合——用户看到的与落盘的从此可以不一致。
+        本方法把整轮收进一个事务：要么全落盘，要么全不落盘。
+        """
+        def _run(cur):
+            cur.execute(
+                "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, 'user', %s, %s)",
+                (task_id, user_msg, turn),
+            )
+            cur.execute(
+                "INSERT INTO messages (task_id, role, content, turn) VALUES (%s, 'assistant', %s, %s)",
+                (task_id, assistant_msg, turn),
+            )
+            if params is not None:
+                cur.execute(
+                    "UPDATE tasks SET params = %s, updated_at = now() WHERE id = %s",
+                    (json.dumps(params or {}), task_id),
+                )
+            return _trim_messages(cur, task_id)
+
+        _log_trim(task_id, self._execute(_run, transaction=True) or 0)
 
     def get_messages(self, task_id: str) -> List[dict]:
         def _run(cur):
@@ -521,7 +701,7 @@ class PostgresStore(BaseStore):
             return cur.fetchall()
 
         return [{"role": r[0], "content": r[1], "turn": r[2]}
-                for r in self._execute(_run)]
+                for r in self._execute(_run, retry_statement=True)]
 
     def delete_task(self, task_id: str) -> None:
         self._execute(lambda cur: cur.execute(

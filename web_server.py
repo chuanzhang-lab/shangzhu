@@ -1135,8 +1135,13 @@ async def delete_task(task_id: str):
     try:
         get_store().delete_task(task_id)
     except Exception as e:
+        # 安全审查 S3 口径（2026-10-07 补齐此处遗漏）：数据库异常原文可能含
+        # 主机名/库名/连接串片段，只进日志、不透传前端。
         logger.error(f"删除任务 {task_id} 失败: {e}")
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "删除失败，请稍后重试或查看服务日志"},
+        )
     # F6：删除任务时同步清理内存中的 session_state，防 4h TTL 到期前内存泄漏
     try:
         from session_state import reset_state
@@ -1394,8 +1399,8 @@ def _is_uuid(s: str) -> bool:
         return False
 
 
-def _persist_turn(store, tid: str, user_msg: str, content: str) -> None:
-    """把一轮对话写入 store：记录 user+assistant 消息 + params 快照。
+def _persist_turn(store, tid: str, user_msg: str, content: str) -> Optional[str]:
+    """把一轮对话**原子**写入 store：user+assistant 消息 + params 快照。
 
     只存业务字段（复用 to_llm_view 过滤思路），不带 `_pending_ops` 等临时内部键，
     避免把运行时临时状态落盘。turn 取自 SessionState。
@@ -1403,19 +1408,34 @@ def _persist_turn(store, tid: str, user_msg: str, content: str) -> None:
     仅对 uuid 任务 id 落盘；legacy 非 uuid thread_id 走纯内存（兼容旧行为）。
 
     F4 修复：不再持有 SessionState 引用迭代 params，改用 to_llm_view 获取锁内拷贝。
+
+    2026-10-07 加固 L1/T1：改用 store.add_turn() 单事务写入——此前分三次调用
+    （2×add_message + update_params）在 autocommit 下各自成事务，崩在中间会留下
+    「有问无答 + params 陈旧」的半回合。2026-10-07 加固 Z3：失败不再只留日志——
+    返回给用户看的提示文案，由响应体 persist_warning 字段送达前端（用户必须知道
+    这一轮没存住，而不是事后才发现对话少了一条）。
+
+    返回：None = 已落盘；字符串 = 未落盘的用户提示。
     """
     if not tid or not _is_uuid(tid):
-        return
+        return None
     try:
         view = to_llm_view(tid)
         turn = view.get("turn", 0)
-        store.add_message(tid, "user", user_msg, turn)
-        store.add_message(tid, "assistant", content, turn)
         biz = {k: v for k, v in (view.get("params") or {}).items()
                if not k.startswith("_")}
-        store.update_params(tid, biz)
+        store.add_turn(tid, user_msg, content, biz, turn)
+        return None
     except Exception as e:  # noqa
-        logger.warning(f"持久化本轮失败(不阻断): {e}")
+        logger.error(f"持久化本轮失败（本轮回答仍返回，但未落盘）: {e}")
+        return "⚠️ 本轮未写入数据库，重启后这段对话会缺失。请检查 PostgreSQL 是否在运行（日志 logs/web_server.log）。"
+
+
+def _with_persist_warning(payload: dict, warn: Optional[str]) -> dict:
+    """把持久化失败提示挂进响应体（有才挂，无则原样返回）。"""
+    if warn:
+        payload["persist_warning"] = warn
+    return payload
 
 
 @app.post("/chat")
@@ -1544,21 +1564,24 @@ async def chat(req: ChatRequest):
                         "\n\n（LLM 只有提议权，应用由你的「应用」关键词 + op_executor 校验共同触发。"
                         "派生字段 monthly_labor / monthly_fixed_cost / monthly_profit 由引擎重算，永不直接改。）"
                     )
-                    _persist_turn(store, tid, last_user_msg, content)
-                    return JSONResponse({
+                    warn = _persist_turn(store, tid, last_user_msg, content)
+                    return JSONResponse(_with_persist_warning({
                         "content": content, "thread_id": tid,
                         "mode": "apply", "intent": "apply", "params": new_merged,
                         "param_sources": new_scan.get("param_sources", {}),
                         "derived": new_scan.get("derived", []),
                         "ops_available": False,
-                    })
+                    }, warn))
                 else:
-                    _persist_turn(store, tid, last_user_msg,
-                                  f"### ❌ 应用失败\n\n{reason}\n\n候选方案已过期或未过校验。重新描述需求即可。")
-                    return JSONResponse({
-                        "content": f"### ❌ 应用失败\n\n{reason}\n\n候选方案已过期或未过校验。重新描述需求即可。",
+                    fail_content = (
+                        f"### ❌ 应用失败\n\n{reason}\n\n候选方案已过期或未过校验。"
+                        "重新描述需求即可。"
+                    )
+                    warn = _persist_turn(store, tid, last_user_msg, fail_content)
+                    return JSONResponse(_with_persist_warning({
+                        "content": fail_content,
                         "thread_id": tid, "mode": "apply", "intent": "apply", "ok": False,
-                    })
+                    }, warn))
 
         # ── 步骤 2: 业务意图 → 工具 + 模板（永不走自由 agent）──
         if intent in _PROJECT_INTENTS:
@@ -1603,8 +1626,8 @@ async def chat(req: ChatRequest):
                     "scan": routed.get("data") or {},
                     "params": routed.get("params") or merged,
                 })
-                _persist_turn(store, tid, last_user_msg, content)
-                return JSONResponse({
+                warn = _persist_turn(store, tid, last_user_msg, content)
+                return JSONResponse(_with_persist_warning({
                     "content": content,
                     "thread_id": tid,
                     "mode": "structured",
@@ -1619,17 +1642,17 @@ async def chat(req: ChatRequest):
                         "analysis_id": analysis_id,
                         "params_version": params_version,
                     },
-                })
+                }, warn))
 
             # 业务意图绝不漏给自由 agent（避免编造）；工具兜不住时给友好提示
             _fallback_content = "抱歉，这条业务请求暂时无法生成结构化分析。请补充项目参数后重试（例如：月营收、总投资、人工成本）。"
-            _persist_turn(store, tid, last_user_msg, _fallback_content)
-            return JSONResponse({
+            warn = _persist_turn(store, tid, last_user_msg, _fallback_content)
+            return JSONResponse(_with_persist_warning({
                 "content": _fallback_content,
                 "thread_id": tid,
                 "mode": "structured",
                 "intent": intent,
-            })
+            }, warn))
 
         # ── 步骤 3: chitchat → 走 Engine Steward（只读、看清净背景当对话伙伴）──
         # 本地工作台只用引擎管理者(llm_advisor)做解读，不引入自由 agent，
@@ -1678,13 +1701,13 @@ async def chat(req: ChatRequest):
                 # 原子写入 session，等用户回「应用X」时取出 op 应用
                 from session_state import set_pending_ops
                 set_pending_ops(tid, ops_proposals)
-        _persist_turn(store, tid, last_user_msg, content)
-        return JSONResponse({
+        warn = _persist_turn(store, tid, last_user_msg, content)
+        return JSONResponse(_with_persist_warning({
             "content": content,
             "thread_id": tid,
             "mode": "steward",
             "intent": "chitchat",
-        })
+        }, warn))
     except Exception as e:
         # S1 修复：错误信息不泄露内部细节（堆栈/路径/版本号），仅内部日志记录
         logger.exception("chat 失败 (thread_id=%s): %s", tid, e)
