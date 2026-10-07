@@ -66,6 +66,13 @@ output/
 config/agent_llm_config.json
 config/storage.json
 
+# ── 用户数据落盘物（含隐私，绝不入库）────────────────────────
+# data/    = LocalFileStore 降级落盘（任务名 / 参数快照 / 完整对话历史）
+# backups/ = pg_dump 备份（同上，且为全库快照）
+# logs/ 已在上方「测试 / 运行产物」块忽略。
+data/
+backups/
+
 # ── 本地工具元数据 ────────────────────────────────────────────
 .workbuddy/
 .hermes/

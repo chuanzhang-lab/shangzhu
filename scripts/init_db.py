@@ -11,7 +11,14 @@ import getpass
 import os
 import sys
 
-import psycopg
+# DDL 单源：与 PostgresStore 启动时的幂等建表共用同一份 SCHEMA_SQL，
+# 不再本文件各存一份（两处 DDL 一旦漂移，会出现「init_db 建的表 != 服务用的表」）。
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "src"))
+
+import psycopg  # noqa: E402
+
+from storage.local_store import SCHEMA_SQL  # noqa: E402
 
 # 免密本地连接默认用当前系统用户名（peer auth），不绑定某台机器；可用环境变量覆盖。
 _LOCAL_USER = getpass.getuser()
@@ -22,29 +29,6 @@ DB_NAME = "shangzhu"
 
 # 业务连接（建表用）。可用 PGDATABASE_URL 覆盖。
 DEFAULT_URL = f"postgresql://{_LOCAL_USER}@localhost:5432/{DB_NAME}"
-
-CREATE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS tasks (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL DEFAULT '新任务',
-    params JSONB NOT NULL DEFAULT '{}',
-    industry TEXT,
-    turn INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id BIGSERIAL PRIMARY KEY,
-    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    turn INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
-"""
-
 
 def ensure_db() -> None:
     """若目标库不存在则创建（幂等）。"""
@@ -60,12 +44,12 @@ def ensure_db() -> None:
 
 
 def ensure_tables() -> None:
-    """在业务库内创建表（幂等）。"""
+    """在业务库内创建表（幂等）。DDL 取自 storage.local_store.SCHEMA_SQL 单源。"""
     url = os.getenv("PGDATABASE_URL") or DEFAULT_URL
     conn = psycopg.connect(url, autocommit=True)
     try:
         with conn.cursor() as cur:
-            cur.execute(CREATE_TABLES_SQL)
+            cur.execute(SCHEMA_SQL)
     finally:
         conn.close()
     print(f"[init_db] OK — DB={DB_NAME} 表就绪")

@@ -140,10 +140,6 @@ class MemoryStore(BaseStore):
         pass
 
 
-# 单任务消息数上限，防止长期运行内存无限增长
-_MAX_MESSAGES_PER_TASK = 500
-
-
 # ── 本地 JSON 文件 store（PG 不可用时的持久化降级）──────────────────────────
 # 放在仓库根的 data/ 下，跨进程重启存活。写盘用「临时文件 + os.replace」原子
 # 替换，避免写到一半崩溃留下半截 JSON 把整个 store 打坏。
@@ -176,7 +172,21 @@ class LocalFileStore(BaseStore):
         # 覆盖/替换失败。实例锁串行化所有写操作（含 _flush），本地单用户量级
         # 锁竞争可忽略。
         self._lock = threading.Lock()
+        self._tighten_perms()
         self._load()
+
+    def _tighten_perms(self) -> None:
+        """把 store 文件权限收紧到 0600（属主可读写）。
+
+        隐私考量（2026-10-07 存储加固）：本文件含任务名、参数快照（租金额、
+        客单价等经营数据）与完整对话历史，早期版本以默认 umask 落盘（644）——
+        同机其他账户可读。已存在的历史文件在下一次启动时一并收紧。
+        """
+        if os.path.isfile(self.path):
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError as e:
+                logger.warning(f"本地 store 文件权限收紧失败（不影响读写）: {e}")
 
     def _load(self) -> None:
         if not os.path.isfile(self.path):
@@ -206,6 +216,12 @@ class LocalFileStore(BaseStore):
                     {"tasks": self._tasks, "msgs": self._msgs},
                     f, ensure_ascii=False,
                 )
+            # 权限随 os.replace 一起生效：先收紧 tmp，再替换，避免出现
+            # 「新文件以 644 短暂可见」的窗口（隐私，见 _tighten_perms）。
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
             os.replace(tmp, self.path)
         finally:
             # 兏底清理：replace 成功后 tmp 已不存在，失败时也把残留 tmp 删掉
