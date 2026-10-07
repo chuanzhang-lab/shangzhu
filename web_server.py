@@ -1004,6 +1004,32 @@ async def index():
     return html.replace("__APP_JS_VER__", _static_ver("app.js"))
 
 
+def _backup_snapshot() -> dict:
+    """备份新鲜度快照（只读、每次现算）。
+
+    /health 每查一次就重新统计 backups/ —— 备份可能在服务运行期间被人跑过，
+    缓存一份就又变成「以为备份过了」。统计只碰文件名与 mtime，开销可忽略。
+    """
+    try:
+        from storage import backup_status
+        return backup_status.backup_status()
+    except Exception:  # noqa: BLE001
+        # 观测位本身绝不能让 /health 挂掉
+        return {"has_backup": False, "latest": None, "age_days": None, "stale": True}
+
+
+def _backup_stale():
+    return _backup_snapshot().get("stale")
+
+
+def _backup_age_days():
+    return _backup_snapshot().get("age_days")
+
+
+def _backup_latest():
+    return _backup_snapshot().get("latest")
+
+
 @app.get("/health")
 async def health():
     uptime_seconds = round(time.time() - _START_TIME, 1)
@@ -1035,6 +1061,13 @@ async def health():
         "store_orphan_tasks": diag.get("orphan_tasks"),
         "store_write_failures": diag.get("write_failures"),
         "store_last_write_ok": diag.get("last_write_ok"),
+        # ── 备份新鲜度（2026-10-08 收口 A）───────────────────────────────
+        # 「有能力备份」不等于「没忘记备份」。没有一个可读出口时，make backup
+        # 全靠人记得跑；忘了跑，前面 4 轮加固出的可恢复性等于没发生。
+        # 只做只读统计（读 backups/ 的 mtime），不触发备份、不含凭据。
+        "backup_stale": _backup_stale(),
+        "backup_age_days": _backup_age_days(),
+        "backup_latest": _backup_latest(),
     }
 
 

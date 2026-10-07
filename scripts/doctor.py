@@ -189,6 +189,40 @@ def run_checks(dsn: str) -> dict:
         layers.append({"layer": "L5 表结构", "ok": False,
                        "detail": f"表结构查询失败：{dburl.mask_text(str(e))}", "fix": []})
 
+    # ── L6 备份新鲜度（2026-10-08 收口 A，非阻塞告警层）───────────────────
+    # 前 4 轮把「备份本身」做扎实了（-Fc + 写完校验 + restore_db.sh 四档 + drill），
+    # 但没人告诉用户「多久没备份了」。这一层把「该备份了」变成看得见的告警。
+    # ok=True：备份过期不该拦住启动（start.sh 在 STORE_BACKEND=pg 时依赖本脚本退出码），
+    # 故用 warn 标记，而不是把整份体检判红。
+    try:
+        from storage import backup_status
+        bs = backup_status.backup_status()
+        if not bs["has_backup"]:
+            layers.append({
+                "layer": "L6 备份新鲜度", "ok": True, "warn": True,
+                "detail": "backups/ 下没有任何备份产物——现在还没有可恢复点",
+                "fix": ["make backup   # 或 ./scripts/backup_db.sh"],
+            })
+        elif bs["stale"]:
+            layers.append({
+                "layer": "L6 备份新鲜度", "ok": True, "warn": True,
+                "detail": f"最新备份 {bs['latest']} 已 {bs['age_days']} 天前"
+                          f"（阈值 {bs['max_age_days']} 天）",
+                "fix": ["make backup",
+                        "# 想自动跑：见 docs/DATABASE.md 的 launchd / cron 定时备份"],
+            })
+        else:
+            layers.append({
+                "layer": "L6 备份新鲜度", "ok": True, "warn": False,
+                "detail": f"最新备份 {bs['latest']}（{bs['age_days']} 天前，未过期）",
+                "fix": [],
+            })
+    except Exception as e:  # noqa: BLE001
+        layers.append({
+            "layer": "L6 备份新鲜度", "ok": True, "warn": True,
+            "detail": f"备份新鲜度检查失败（不影响运行）：{e}", "fix": [],
+        })
+
     return {"dsn_target": dburl.target(dsn), "layers": layers,
             "ok": all(l["ok"] for l in layers)}
 
@@ -209,7 +243,12 @@ def main(argv=None) -> int:
 
     print(f"[doctor] 目标：{result['dsn_target']}  （连接串：{result['dsn_safe']}）")
     for layer in result["layers"]:
-        mark = "✅" if layer["ok"] else "❌"
+        if not layer["ok"]:
+            mark = "❌"
+        elif layer.get("warn"):
+            mark = "⚠️ "   # 非阻塞告警（如备份过期）：不拦启动，但要看
+        else:
+            mark = "✅"
         print(f"  {mark} {layer['layer']}：{layer['detail']}")
         for line in layer["fix"]:
             print(f"       → {line}")
