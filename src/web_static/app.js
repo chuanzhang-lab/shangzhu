@@ -685,6 +685,29 @@ function showVersionBanner() {
   el.addEventListener('click', () => location.reload(true));
   document.body.appendChild(el);
 }
+// ── 存储降级横幅（存储加固-3，T2/L2/Z3）─────────────────────────────────────
+// 背景：PG 不可用时 get_store() 会降级到本地文件 / 内存 store，但此前只有服务端
+// 日志知道——用户以为数据都存进了 PG，重启后才发现对话少了一截（静默分流）。
+// 降级必须在页面上可见：文件 store 尚可救（重启不丢 + 可迁回），内存 store 明确会丢。
+let _storeBannerShown = false;
+function showStoreBanner(d) {
+  if (_storeBannerShown) return;
+  _storeBannerShown = true;
+  const el = document.createElement('div');
+  el.id = 'store-banner';
+  const isMemory = d.store_backend === 'MemoryStore';
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9998;background:' +
+    (isMemory ? '#b91c1c' : '#d97706') + ';color:#fff;padding:10px 16px;font-size:13px;text-align:center;';
+  if (isMemory) {
+    el.textContent = '⛔ 数据库不可用，数据只存在内存中——重启即丢。请检查 PostgreSQL（日志 logs/web_server.log）。';
+  } else {
+    const where = d.store_file_path ? '（' + d.store_file_path + '）' : '';
+    el.textContent = '⚠️ 数据库不可用，数据暂存本地文件' + where +
+      '——重启不丢，但不会自动迁回 PostgreSQL（scripts/migrate_json_to_pg.py 可迁回）。';
+  }
+  el.addEventListener('click', () => { if (el.parentNode) el.parentNode.removeChild(el); });
+  document.body.appendChild(el);
+}
 async function checkVersionHandshake() {
   const now = Date.now();
   if (now - _verCheckAt < 60000) return;  // 节流：每分钟最多核对一次
@@ -696,6 +719,7 @@ async function checkVersionHandshake() {
     if (d && d.static_ver && window.__PAGE_VER__ && String(d.static_ver) !== String(window.__PAGE_VER__)) {
       showVersionBanner();
     }
+    if (d && d.store_degraded) showStoreBanner(d);
   } catch (_) { /* 握手失败静默 */ }
 }
 
@@ -1082,6 +1106,10 @@ async function send() {
     const msgCat = classifyResponse(data, null);
     tagMessage(placeholder, msgCat);
     // 对话始终完整可见（分类仅作面板透镜，不隐藏消息）
+
+    // ── 持久化失败提示（存储加固-3，Z3）──
+    // 本轮没写进数据库时，用户必须当场知道（否则重启后才发现对话缺一截）。
+    if (data.persist_warning) setToast(data.persist_warning, '#d97706');
 
     // ── 应用 A/B 按钮（使用 addActionButtons 辅助函数）──
     if (data.ops_available) {

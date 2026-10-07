@@ -1,5 +1,5 @@
 # 创业者工作台 (A) — 常用工程命令
-.PHONY: help sync test smoke lint e2e start health compile
+.PHONY: help sync test smoke lint e2e start health compile doctor backup restore restore-check drill
 
 PY ?= .venv/bin/python3
 # 端口统一口径：与 start.sh / web_server.py 默认值一致（8081）
@@ -14,6 +14,11 @@ help:
 	@echo "make compile  - 字节码编译检查"
 	@echo "make start    - 启动本地服务 (PORT=$(PORT))"
 	@echo "make health   - curl /health（需服务已启动）"
+	@echo "make doctor   - 存储环境体检（PG 五层分辨 + 修复命令）"
+	@echo "make backup   - 备份 PG 到 backups/（-Fc，写完即校验）"
+	@echo "make restore-check - 校验最新备份可读（pg_restore --list）"
+	@echo "make drill    - 恢复演练（临时库 → 行数核对 → 自动清理，不碰生产库）"
+	@echo "make restore  - 从最新备份恢复到新库（--into-db）"
 
 sync:
 	uv sync
@@ -46,3 +51,21 @@ start:
 
 health:
 	curl -sS "http://127.0.0.1:$(PORT)/health" | $(PY) -m json.tool
+
+# ── 存储运维四件套（2026-10-07 存储加固 X1/R1/R2）─────────────────────────
+# 口径：备份必须可校验、恢复必须演练过、体检必须给出可粘贴的修复命令。
+doctor:
+	$(PY) scripts/doctor.py
+
+backup:
+	./scripts/backup_db.sh
+
+restore-check:
+	./scripts/restore_db.sh --check
+
+# 恢复演练：临时库恢复 + 行数核对 + 自动清理，全程不碰生产库
+drill:
+	./scripts/restore_db.sh --rehearsal
+
+restore:
+	./scripts/restore_db.sh --into-db "$(DB)_restore_$(shell date +%Y%m%d_%H%M%S)"

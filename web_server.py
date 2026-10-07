@@ -126,7 +126,7 @@ from op_executor import (
 )
 
 # 本地存储层：任务持久化（Task 4 引入）
-from storage.local_store import get_store
+from storage.local_store import get_store, note_write_result, store_diagnostics
 
 # ── 配置单源 ──────────────────────────────────────────────────────────────
 # model/endpoint 统一从 config/agent_llm_config.json 读取（经 llm_advisor），
@@ -980,6 +980,11 @@ async def index():
 async def health():
     uptime_seconds = round(time.time() - _START_TIME, 1)
     stats = session_stats()
+    # 顺序要紧：先 get_store() 确保 store 已初始化（初始化时才填 _diag），
+    # 再取诊断快照。反过来会在「首次请求恰好是 /health」时拿到空诊断——
+    # 明明已降级却报 store_degraded=False（端到端验证时抓到过）。
+    store_backend = type(get_store()).__name__
+    diag = store_diagnostics()
     return {
         "status": "ok",
         "model": get_model_name(),
@@ -990,7 +995,17 @@ async def health():
         "uptime_seconds": uptime_seconds,
         "llm_configured": has_api_key(),
         "sessions": stats,
-        "store_backend": type(get_store()).__name__,
+        "store_backend": store_backend,
+        # ── 存储诊断（存储加固-3，T2/L2/Z3）──────────────────────────────
+        # 降级不能只在服务端日志里：用户与前端要能直接看到「数据现在落在哪、
+        # 为什么、写成功过没有」。字段全部脱敏（不含凭据）。
+        "store_degraded": diag.get("degraded"),
+        "store_target": diag.get("target"),
+        "store_degrade_reason": diag.get("degrade_reason"),
+        "store_file_path": diag.get("file_store_path"),
+        "store_orphan_tasks": diag.get("orphan_tasks"),
+        "store_write_failures": diag.get("write_failures"),
+        "store_last_write_ok": diag.get("last_write_ok"),
     }
 
 
@@ -1425,9 +1440,11 @@ def _persist_turn(store, tid: str, user_msg: str, content: str) -> Optional[str]
         biz = {k: v for k, v in (view.get("params") or {}).items()
                if not k.startswith("_")}
         store.add_turn(tid, user_msg, content, biz, turn)
+        note_write_result(True)
         return None
     except Exception as e:  # noqa
         logger.error(f"持久化本轮失败（本轮回答仍返回，但未落盘）: {e}")
+        note_write_result(False)
         return "⚠️ 本轮未写入数据库，重启后这段对话会缺失。请检查 PostgreSQL 是否在运行（日志 logs/web_server.log）。"
 
 

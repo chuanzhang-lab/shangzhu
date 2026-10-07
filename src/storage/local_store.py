@@ -25,7 +25,6 @@
 """
 from __future__ import annotations
 
-import getpass
 import json
 import logging
 import os
@@ -33,6 +32,12 @@ import time
 import threading
 import uuid
 from typing import List, Optional
+
+# 连接串单源（2026-10-07 加固 L4）：本模块不再自己解析 URL 优先级。
+try:
+    from storage import dburl as _dburl_mod
+except ImportError:  # 以文件方式被直接导入（无 src 在 sys.path）时的兜底
+    import dburl as _dburl_mod  # type: ignore[no-redef]
 
 # 挂到 web_server 配置的 "web" logger 之下，继承其控制台 + logs/web_server.log
 # 双通道 handler——降级原因必须能在日志文件里查到，不能只走 stderr 的 lastResort。
@@ -197,9 +202,17 @@ def _file_store_path() -> str:
     """本地文件 store 路径。可用 LOCAL_STORE_PATH 覆盖（测试用临时目录）。
 
     以 __file__ 定位仓库根，不依赖 cwd——web_server 启动时会 chdir 到 src/。
+
+    覆盖值可以是**文件路径**，也可以是**目录**（目录则落在其下 local_store.json）。
+    目录口径来自本函数的原始文档与测试基建（conftest / e2e 都传临时目录），但早期
+    实现把目录当文件用：`os.replace(tmp, 目录)` 必失败 → 降级到文件 store 这一档在
+    测试里实际从未生效（静默落到内存），日志里还会留下误导性的 "Is a directory"
+    ERROR。此处按文档口径修正（2026-10-07 加固 Z3 附带）。
     """
     override = os.getenv("LOCAL_STORE_PATH")
     if override:
+        if os.path.isdir(override):
+            return os.path.join(override, "local_store.json")
         return override
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(root, "data", "local_store.json")
@@ -388,10 +401,12 @@ class LocalFileStore(BaseStore):
         pass
 
 
-# ── 数据库连接配置 ────────────────────────────────────────────────────────
+# ── 数据库连接配置（单源：storage/dburl.py）──────────────────────────────
 # 默认走本机当前用户名的免密 peer 连接（与 README「<系统用户名>」口径一致），
 # 可被 PGDATABASE_URL / config/storage.json 的 db_url 覆盖。
-_DEFAULT_DB_URL = f"postgresql://{getpass.getuser()}@localhost:5432/shangzhu"
+# 2026-10-07 加固 L4：解析收敛到 dburl 单源——此前 local_store / init_db.py /
+# backup_db.sh 各有一份，「备份的库」与「实际用的库」可能不是同一个。
+_DEFAULT_DB_URL = _dburl_mod.DEFAULT_DB_URL
 
 # ── 连接层失败预算（2026-10-07 加固 S1/Z1）────────────────────────────────
 # 缺这三条超时时，PG 半开/wedged 会让一次卡住的查询永久占住 _conn_lock，
@@ -451,25 +466,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
 
 
 def _db_url() -> str:
-    """获取业务库连接串，三级优先级：env var → config file → 内置默认。"""
-    env_url = os.getenv("PGDATABASE_URL")
-    if env_url and env_url.strip():
-        return env_url.strip()
+    """业务库连接串，三级优先级：env var → config file → 内置默认。
 
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "config", "storage.json",
-    )
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        file_url = (cfg.get("db_url") or "").strip()
-        if file_url:
-            return file_url
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    return _DEFAULT_DB_URL
+    唯一实现在 `storage/dburl.py`（2026-10-07 加固 L4）；本函数保留为兼容入口
+    （tests/test_config_priority.py 与既有调用点依赖此名）。
+    """
+    return _dburl_mod.resolve_db_url()
 
 
 def _row_to_task(row) -> dict:
@@ -713,17 +715,74 @@ class PostgresStore(BaseStore):
         self._drop_conn()
 
 
+# ── 运行期诊断（2026-10-07 加固 T2）──────────────────────────────────────
+# 「用了哪个后端、为什么、写成功过没有」必须有程序可读的出口。此前只有日志，
+# /health 只暴露类型名——前端与用户对降级一无所知，降级于是成了静默分流。
+_diag: dict = {
+    "backend": None,
+    "target": None,           # host:port/dbname 或文件路径（不含凭据）
+    "degraded": False,
+    "degrade_reason": None,   # PG 不可用时的错误摘要（凭据已打码）
+    "file_store_path": None,
+    "orphan_tasks": 0,        # PG 就绪、但存在未迁回的降级期数据（加固 L2）
+    "write_failures": 0,      # 运行期持久化失败次数（_persist_turn 上报）
+    "last_write_ok": None,
+}
+
+
+def store_diagnostics() -> dict:
+    """当前 store 后端与降级诊断（供 /health；保证不含任何凭据）。"""
+    return dict(_diag)
+
+
+def note_write_result(ok: bool) -> None:
+    """上报一次写盘结果：失败计数 + 最近状态（供 /health 与前端提示）。"""
+    _diag["last_write_ok"] = bool(ok)
+    if not ok:
+        _diag["write_failures"] = int(_diag["write_failures"]) + 1
+
+
+def _count_orphan_tasks() -> int:
+    """降级期写进本地 JSON、PG 恢复后仍未迁回的任务数（加固 L2）。
+
+    get_store() 原先只在**降级时**提示孤儿数据；PG 恢复那一刻不打任何招呼，
+    这批数据因此不可见——日志与 /health 都查不到，用户以为「数据都在 PG 里」。
+    """
+    path = _file_store_path()
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return sum(1 for t in (data.get("tasks") or {}).values()
+                   if not (t or {}).get("deleted_at"))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _describe_target(store: BaseStore) -> str:
+    """后端落地位置（脱敏）：PG → host:port/dbname；文件 → 路径；内存 → 说明。"""
+    if isinstance(store, PostgresStore):
+        return _dburl_mod.target(getattr(store, "url", "") or _db_url())
+    if isinstance(store, LocalFileStore):
+        return getattr(store, "path", "") or _file_store_path()
+    return "内存（不落盘）"
+
+
 # ── store 工厂 ────────────────────────────────────────────────────────────
 _store: Optional[BaseStore] = None
 
 
 _store_lock = threading.Lock()  # 审查修复 F8：防并发首次初始化创建多个实例
 
+
 def get_store() -> BaseStore:
     """全局单例 store：PG → 本地 JSON 文件 → 内存（最后一档才丢数据）。
 
     **降级必有痕**：每一档降级都经 `web.local_store` logger 打 WARNING/ERROR，
     继承 web_server 的控制台 + `logs/web_server.log` 双通道，排查时能直接查到原因。
+    2026-10-07 加固 T2：同一事实同时写入 `_diag`，由 /health 暴露给前端与用户——
+    日志只有开发者看得到，而「我的数据现在落在哪」用户必须知道。
     """
     global _store
     if _store is not None:
@@ -736,12 +795,16 @@ def get_store() -> BaseStore:
 
         # 1) PostgreSQL：持久化首选
         candidate: Optional[BaseStore] = None
+        degrade_reason: Optional[str] = None
         try:
             pg = PostgresStore()
             pg.ping()
             candidate = pg
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"PostgreSQL 不可用（{e}），降级本地文件 store")
+            degrade_reason = _dburl_mod.mask_text(str(e))
+            # 不套「PostgreSQL 不可用（...）」前缀：StoreUnavailableError 的文案
+            # 已自带该措辞，再包一层会变成「PostgreSQL 不可用（PostgreSQL 不可用…）」。
+            logger.warning(f"{e}——降级本地文件 store")
             if candidate is not None:
                 candidate.close()
 
@@ -763,10 +826,33 @@ def get_store() -> BaseStore:
         # 3) 内存兜底：最后一道，明确标注会丢
         _store = candidate if candidate is not None else MemoryStore()
         logger.info(f"存储后端就绪: {type(_store).__name__}")
+
+        # PG 就绪时检查降级期孤儿数据（加固 L2：恢复那一刻同样要留痕）
+        if isinstance(_store, PostgresStore):
+            orphans = _count_orphan_tasks()
+            if orphans:
+                logger.warning(
+                    f"检测到降级期孤儿数据：本地 JSON 里有 {orphans} 条任务未迁回 PG"
+                    "——先 dry-run 预览再执行：scripts/migrate_json_to_pg.py"
+                )
+            _diag["orphan_tasks"] = orphans
+
+        _diag.update(
+            backend=type(_store).__name__,
+            target=_describe_target(_store),
+            degraded=not isinstance(_store, PostgresStore),
+            degrade_reason=degrade_reason,
+            file_store_path=(getattr(_store, "path", None)
+                             if isinstance(_store, LocalFileStore) else None),
+        )
     return _store
 
 
 def reset_store_for_tests() -> None:
-    """清空单例（测试隔离用）。"""
+    """清空单例与诊断（测试隔离用）。"""
     global _store
     _store = None
+    _diag.update(
+        backend=None, target=None, degraded=False, degrade_reason=None,
+        file_store_path=None, orphan_tasks=0, write_failures=0, last_write_ok=None,
+    )
