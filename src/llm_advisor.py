@@ -26,12 +26,18 @@ import requests
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
+from config.settings import normalize_base_url
+
 logger = logging.getLogger(__name__)
 # HTTP 客户端上限：配置 timeout 不得超过此值（防超长挂起拖垮并发）。
 # 各入口由 web_server wait_for 分层：闲聊 steward 8s，顾问/按需解读 240s。
 # 本值必须 > 解读预算 240s（取 250s）：wait_for 先赢才能给出干净的「解读超时」文案；
 # 若客户端先抛 APITimeoutError，用户看到的是「解读失败，可重试」。
 _LLM_TIMEOUT = 250
+# 连通性探测（test_llm_config）预算：本机直连 openrouter 实测 max_tokens=1 全程
+# 2.3~8.6s、TLS 握手最长 13s，旧值 5s 必挂（2026-10-08 对运行服务实测 3/3 超时）。
+# 30s ≈ 3× 最坏观测；分层口径：闲聊 steward 8s < 探测 30s < 解读 240s < HTTP 客户端 250s。
+_PROBE_TIMEOUT_S = 30.0
 _llm_cache_lock = threading.Lock()
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # 默认值，实际优先从 config 读取
@@ -227,15 +233,19 @@ def get_model_name() -> str:
 
 
 def get_base_url() -> str:
-    """配置单源：LLM 端点，优先从 config 读，fallback 到默认常量。"""
+    """配置单源：LLM 端点，优先从 config 读，fallback 到默认常量。
+
+    返回前经 normalize_base_url 归一（剥离 /chat/completions 后缀，统一 SDK 形态）：
+    主链路 ChatOpenAI 由此拿到正确 base_url（openai SDK 会再拼一次端点路径）。
+    """
     try:
         cfg = _load_llm_config()
         url = (cfg.get("config", {}) or {}).get("base_url", "")
         if url:
-            return url.strip()
+            return normalize_base_url(url)
     except Exception:
         pass
-    return DEEPSEEK_BASE_URL
+    return normalize_base_url(DEEPSEEK_BASE_URL)
 
 
 def has_api_key() -> bool:
@@ -747,7 +757,7 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
 
     返回：
     - {"ok": bool, "status_code": int|None, "error": str, "latency_ms": int}
-    - 超时 5s，避免拖慢保存体验
+    - 超时 _PROBE_TIMEOUT_S=30s（本机直连 openrouter 实测延迟决定；保存 toast 最多延迟这么多）
     - 用 max_tokens=1 极简请求，几乎不消耗额度
 
     安全审查 S6 修复：仅允许 https 公网地址（防 SSRF 内网探测），
@@ -773,7 +783,9 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
             if _domain not in _old:
                 os.environ[_var] = f"{_domain},{_old}" if _old else _domain
 
-    url = (base_url or "").strip().rstrip("/") + "/chat/completions"
+    # 归一后再拼一次端点路径：无论输入 SDK 形态（…/v1）还是完整端点形态
+    # （…/v1/chat/completions），请求 URL 都恰好含一个 /chat/completions。
+    url = normalize_base_url(base_url) + "/chat/completions"
     headers = {
         "Authorization": f"Bearer {(api_key or '').strip()}",
         "Content-Type": "application/json",
@@ -785,7 +797,7 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
     }
     t0 = _time.time()
     try:
-        resp = post(url, headers=headers, json=payload, timeout=5, verify=True)
+        resp = post(url, headers=headers, json=payload, timeout=_PROBE_TIMEOUT_S, verify=True)
         latency = int((_time.time() - t0) * 1000)
         if resp.status_code == 200:
             return {"ok": True, "status_code": 200, "error": "", "latency_ms": latency}
@@ -793,10 +805,14 @@ def test_llm_config(model: str, base_url: str, api_key: str) -> dict:
         return {"ok": False, "status_code": resp.status_code, "error": f"HTTP {resp.status_code}（服务端返回非 200）", "latency_ms": latency}
     except exceptions.Timeout:
         latency = int((_time.time() - t0) * 1000)
-        return {"ok": False, "status_code": None, "error": f"探测超时（>5s）", "latency_ms": latency}
+        # except-audit-20261003 B 项：异常分支必须有服务端日志（不含 key/响应体）
+        logger.warning("连通性探测超时: url=%s latency=%dms", url, latency)
+        return {"ok": False, "status_code": None, "error": f"探测超时（>{int(_PROBE_TIMEOUT_S)}s）", "latency_ms": latency}
     except exceptions.ConnectionError as e:
         latency = int((_time.time() - t0) * 1000)
+        logger.warning("连通性探测连接失败: url=%s err=%s latency=%dms", url, e, latency)
         return {"ok": False, "status_code": None, "error": f"连接失败: {e}", "latency_ms": latency}
     except Exception as e:  # noqa: BLE001
         latency = int((_time.time() - t0) * 1000)
+        logger.warning("连通性探测异常: url=%s err=%s latency=%dms", url, e, latency)
         return {"ok": False, "status_code": None, "error": f"探测异常: {e}", "latency_ms": latency}

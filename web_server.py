@@ -1174,8 +1174,10 @@ async def test_llm_settings(req: Request):
         return JSONResponse({"error": "API Key 不能为空"}, status_code=400)
 
     try:
-        result = test_llm_config(model, base_url, api_key)
-    except Exception as e:
+        # 探测预算 30s（llm_advisor._PROBE_TIMEOUT_S）：同步调用会阻塞事件循环
+        # 最长 30s，必须放到线程池（保存体验：toast 最长延迟 = 探测预算）。
+        result = await asyncio.to_thread(test_llm_config, model, base_url, api_key)
+    except Exception:
         logger.exception("连通性探测失败")
         # 安全审查 S3：同上，异常原文不透传
         return JSONResponse({"ok": False, "error": "探测失败，请稍后重试或查看服务日志"}, status_code=500)

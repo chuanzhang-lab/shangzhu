@@ -158,3 +158,98 @@ class TestTestLlmSettings:
         data = r.json()
         assert data["ok"] is False
         assert "超时" in data.get("error", "")
+
+
+class TestProbeHardening:
+    """连通性探测加固（docs/fix-llm-probe-timeout-20261008.md）：
+    超时预算、探测 URL 单次拼接、base_url 归一。"""
+
+    def test_probe_timeout_budget_is_30s(self):
+        import llm_advisor
+        assert llm_advisor._PROBE_TIMEOUT_S == 30.0
+
+    def test_normalize_base_url_variants(self):
+        from config.settings import normalize_base_url
+        assert normalize_base_url("https://openrouter.ai/api/v1/chat/completions") == "https://openrouter.ai/api/v1"
+        assert normalize_base_url("https://openrouter.ai/api/v1/chat/completions/") == "https://openrouter.ai/api/v1"
+        assert normalize_base_url("https://api.deepseek.com/v1") == "https://api.deepseek.com/v1"
+        assert normalize_base_url("https://api.deepseek.com/v1/") == "https://api.deepseek.com/v1"
+        assert normalize_base_url(
+            "https://openrouter.ai/api/v1/chat/completions/chat/completions"
+        ) == "https://openrouter.ai/api/v1"
+        assert normalize_base_url("") == ""
+
+    @staticmethod
+    def _capture_post(captured):
+        import requests as req
+        class MockResponse:
+            status_code = 200
+            text = "{}"
+        def mock_post(url=None, **kwargs):
+            captured["url"] = url
+            return MockResponse()
+        return mock_post
+
+    def test_probe_url_single_completion_suffix(self, client, monkeypatch):
+        """完整端点形态的 base_url 探测时不得双拼（修复前拼出 .../chat/completions/chat/completions）。"""
+        captured = {}
+        import requests as req
+        monkeypatch.setattr(req, "post", self._capture_post(captured))
+        r = client.post("/settings/llm/test", json={
+            "model": "mimo-v2.5-pro",
+            "base_url": "https://openrouter.ai/api/v1/chat/completions",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
+        }, headers=XHR)
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+
+    def test_probe_url_appends_for_sdk_form(self, client, monkeypatch):
+        """SDK 形态（…/v1）输入仍要追加一次 /chat/completions（防归一过度剥离）。"""
+        captured = {}
+        import requests as req
+        monkeypatch.setattr(req, "post", self._capture_post(captured))
+        r = client.post("/settings/llm/test", json={
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
+        }, headers=XHR)
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
+
+    def test_save_normalizes_base_url(self, client):
+        """保存完整端点形态 → 配置单源落盘为 SDK 形态（先存原值，finally 还原）。"""
+        before = _cfg(client)
+        original = before["base_url"]
+        try:
+            r = client.post("/settings/llm", json={
+                "model": before["model"],
+                "base_url": "https://openrouter.ai/api/v1/chat/completions",
+                "api_key": "",
+            }, headers=XHR)
+            assert r.status_code == 200
+            assert _cfg(client)["base_url"] == "https://openrouter.ai/api/v1"
+        finally:
+            client.post("/settings/llm", json={
+                "model": before["model"],
+                "base_url": original,
+                "api_key": "",
+            }, headers=XHR)
+
+    def test_get_llm_base_url_normalized(self, monkeypatch):
+        """主链路：存量完整端点形态经 get_base_url 归一，ChatOpenAI 收到 SDK 形态。"""
+        import llm_advisor
+        fake = {"config": {
+            "model": "mimo-v2.5-pro",
+            "base_url": "https://openrouter.ai/api/v1/chat/completions",
+            "api_key": "ak_TEST_KEY_NOT_REAL_0000000000000",
+            "timeout": 250,
+        }}
+        monkeypatch.setattr(llm_advisor, "_load_llm_config", lambda: fake)
+        monkeypatch.setattr(llm_advisor, "_api_key", lambda: "ak_TEST_KEY_NOT_REAL_0000000000000")
+        monkeypatch.setattr(llm_advisor, "_llm_cache", None)
+        client = llm_advisor._get_llm()
+        shown = str(client.root_client.base_url)
+        assert "chat/completions" not in shown
+        assert shown.rstrip("/") == "https://openrouter.ai/api/v1"

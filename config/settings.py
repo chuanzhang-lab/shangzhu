@@ -194,6 +194,21 @@ def update_config(mutator) -> dict:
             raise ValueError(msg)
         return get_masked()
 
+def normalize_base_url(base_url: str) -> str:
+    """归一 base_url 为 OpenAI SDK 形态（不含 /chat/completions 后缀）。
+
+    用户常把完整端点（…/v1/chat/completions）填进「接口 URL」，而 openai SDK
+    的 URL 合并是 base 路径直拼相对路径（openai/_base_client.py _merge_url），
+    会拼出双 /chat/completions——目前仅靠 OpenRouter 容错（实测仍 200），
+    严格网关会 404。保存（本模块）、读取（llm_advisor.get_base_url）、
+    探测（llm_advisor.test_llm_config）三处共用，见 docs/fix-llm-probe-timeout-20261008.md 条目 2。
+    """
+    u = (base_url or "").strip().rstrip("/")
+    while u.endswith("/chat/completions"):
+        u = u[: -len("/chat/completions")]
+    return u
+
+
 def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
     """保存 LLM 配置，返回脱敏视图。
     
@@ -216,7 +231,7 @@ def save_llm_config(model: str, base_url: str, api_key: str) -> dict:
 
         # 更新字段
         inner["model"] = model.strip()
-        inner["base_url"] = base_url.strip()
+        inner["base_url"] = normalize_base_url(base_url)
         if api_key:
             inner["api_key"] = api_key.strip()
 
