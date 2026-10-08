@@ -255,3 +255,67 @@ def test_analysis_advice_success_timeout_and_stale():
     assert stale.status_code == 200
     assert stale.json()["status"] == "stale"
     assert not stale.json().get("text")
+
+
+# ── AI 解读超时预算 240s + analysis-meta 端点（fix-ai-advice-timeout-240s-20261008）──
+
+def test_advice_timeout_budget_is_240s():
+    """解读超时链路分层不变量：wait_for 预算 = 240s，且 LLM HTTP 客户端上限必须更长。
+
+    客户端 timeout ≤ wait_for 时，客户端先抛错，用户看到的是「解读失败」而不是
+    「解读超时」——文案契约被破坏。此断言锁住两层的先后关系。
+    """
+    import llm_advisor
+    assert ws._LLM_ADVICE_TIMEOUT == 240.0
+    assert float(llm_advisor._LLM_TIMEOUT) > float(ws._LLM_ADVICE_TIMEOUT)
+
+
+def test_analysis_advice_survives_slow_call():
+    """慢调用（32s，> 旧 30s 预算）不再被 wait_for 掐死：240s 预算下正常返回 ok。"""
+    import time as _time
+    tid = "rb-slow-advice"
+    r = _chat([{"role": "user",
+                "content": "奶茶店月租金1万员工2人工资各5000客单价15日售50杯"}],
+              tid=tid)
+    assert r.status_code == 200
+    meta = r.json()["ai_advice"]
+
+    def _slow(scan, user_text="", session_snapshot=None, context=None):
+        _time.sleep(32)  # 旧 _ADVISOR_PANEL_TIMEOUT=30s 下必超时，240s 下应存活
+        return {"text": "慢速解读完成，只翻译引擎数字。", "ops": []}
+
+    saved = ws.llm_advise
+    try:
+        ws.llm_advise = _slow
+        ok = _client.post("/analysis/advice", json={
+            "thread_id": tid,
+            "analysis_id": meta["analysis_id"],
+            "params_version": meta["params_version"],
+        }, headers=_XHR)
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["status"] == "ok", body
+        assert "慢速解读完成" in body["text"]
+    finally:
+        ws.llm_advise = saved
+
+
+def test_tasks_analysis_meta_endpoint():
+    """GET /tasks/{tid}/analysis-meta：有分析返回与 /chat ai_advice 一致的元数据；无分析 available=false。"""
+    tid = "rb-advice-meta"
+    r = _chat([{"role": "user",
+                "content": "奶茶店月租金1万员工2人工资各5000客单价15日售50杯"}],
+              tid=tid)
+    assert r.status_code == 200
+    meta = r.json()["ai_advice"]
+
+    got = _client.get(f"/tasks/{tid}/analysis-meta")
+    assert got.status_code == 200
+    body = got.json()
+    assert body["available"] is True
+    assert body["analysis_id"] == meta["analysis_id"]
+    assert body["params_version"] == meta["params_version"]
+
+    none = _client.get("/tasks/no-such-task-xyz/analysis-meta")
+    assert none.status_code == 200
+    assert none.json() == {"available": False}

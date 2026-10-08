@@ -39,8 +39,10 @@ lint:
 
 # 浏览器 e2e 冒烟（M-08）：真 Chromium 加载→新建任务→断言零 console error/
 # 零未捕获异常/零 /client-log 上报。静态扫描测不出的运行期 TypeError 在这里拦。
+# advice.mjs：AI 解读按钮生命周期 + 前端 abort 预算（fix-ai-advice-timeout-240s）。
 e2e:
 	node tests/e2e/smoke.mjs
+	node tests/e2e/advice.mjs
 
 compile:
 	$(PY) -m compileall -q src web_server.py tests

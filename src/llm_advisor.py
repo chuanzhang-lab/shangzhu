@@ -27,9 +27,11 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
-# HTTP 客户端上限：配置 timeout 不得超过此值（防 300s 拖垮并发）。
-# 各入口由 web_server wait_for 分层：闲聊 steward 8s，顾问/按需解读 30s。
-_LLM_TIMEOUT = 45
+# HTTP 客户端上限：配置 timeout 不得超过此值（防超长挂起拖垮并发）。
+# 各入口由 web_server wait_for 分层：闲聊 steward 8s，顾问/按需解读 240s。
+# 本值必须 > 解读预算 240s（取 250s）：wait_for 先赢才能给出干净的「解读超时」文案；
+# 若客户端先抛 APITimeoutError，用户看到的是「解读失败，可重试」。
+_LLM_TIMEOUT = 250
 _llm_cache_lock = threading.Lock()
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # 默认值，实际优先从 config 读取

@@ -28,7 +28,7 @@ _DEFAULT_CONFIG = {
         "base_url": "https://api.deepseek.com/v1",
         "api_key": "",
         "temperature": 0.3,
-        "timeout": 60,
+        "timeout": 250,
     }
 }
 

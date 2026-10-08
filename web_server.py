@@ -241,7 +241,10 @@ _MAX_INPUT_LENGTH = 10000
 # 闲聊 steward 硬超时：超时不阻断主流程。
 _LLM_ADVISE_TIMEOUT = 8.0
 # 顾问面板 / 按需 AI 解读：用户主动触发，允许完整调用完成。
-_ADVISOR_PANEL_TIMEOUT = 30.0
+# 超时分层口径（fix-ai-advice-timeout-240s-20261008）：闲聊 8s / 解读 240s /
+# LLM HTTP 客户端 250s（llm_advisor._LLM_TIMEOUT，必须 > 本值，否则客户端先抛错，
+# 用户看到的是「解读失败」而不是「解读超时」）/ 前端 abort 250s（app.js，同理兜底）。
+_LLM_ADVICE_TIMEOUT = 240.0
 
 
 async def _advise_with_timeout(*args, timeout=None, **kwargs):
@@ -1206,6 +1209,25 @@ async def get_task_messages(task_id: str):
     return get_store().get_messages(task_id)
 
 
+@app.get("/tasks/{task_id}/analysis-meta")
+async def get_task_analysis_meta(task_id: str):
+    """最新一轮分析的 ai_advice 元数据（历史恢复后前端补挂「生成 AI 解读」按钮用）。
+
+    形状与 /chat structured 响应的 ai_advice 字段一致（available/status/analysis_id/
+    params_version，见本文件 structured 分支）；无分析快照时 available=false，前端不补挂。
+    只读 session_state，无副作用。
+    """
+    snap = get_last_analysis(task_id)
+    if not snap:
+        return {"available": False}
+    return {
+        "available": True,
+        "status": "idle",
+        "analysis_id": snap.get("analysis_id"),
+        "params_version": snap.get("params_version"),
+    }
+
+
 @app.delete("/tasks/{task_id}")
 async def delete_task(task_id: str):
     """软删（归档）：隐藏但保留消息，可恢复。同时清理 session_state 防内存泄漏。"""
@@ -1267,7 +1289,7 @@ async def get_advisor(tid: str):
     try:
         advice = await _advise_with_timeout(
             scan, "", clean_view, advise_context,
-            timeout=_ADVISOR_PANEL_TIMEOUT,
+            timeout=_LLM_ADVICE_TIMEOUT,
         )
     except Exception as e:
         logger.warning(f"顾问 LLM 调用失败: {e}")
@@ -1336,7 +1358,7 @@ async def post_analysis_advice(req: AdviceRequest):
             user_text,
             to_llm_view(tid, focus_fields=infer_focus_fields(user_text)),
             advise_context,
-            timeout=_ADVISOR_PANEL_TIMEOUT,
+            timeout=_LLM_ADVICE_TIMEOUT,
         )
     except Exception as e:
         logger.warning("按需解读失败: %s", e)

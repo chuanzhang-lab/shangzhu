@@ -226,7 +226,23 @@ async function switchTask(id) {
     // 历史恢复不补挂「应用A/B」按钮：历史候选方案对应的 _pending_ops 已随会话失效，
     // 补挂只会产生「点击必失败」的死按钮（当前会话里没有生成过名为 A 的候选方案）。
     // 应用按钮仅在 send 实时返回 ops_available=true 时挂到当前轮消息上。
-    msgs.forEach(m => { addMessage(m.role, m.content, false, 'all'); });
+    let lastAssistant = null;
+    msgs.forEach(m => {
+      const el = addMessage(m.role, m.content, false, 'all');
+      if (m.role === 'assistant') lastAssistant = el;
+    });
+    // AI 解读按钮与 A/B 不同：后端按 task_id 取最新分析（无会话态依赖），历史恢复后
+    // 必须补挂，否则刷新/切任务后按钮永久消失（fix-ai-advice-timeout-240s-20261008）。
+    if (lastAssistant) {
+      fetch('/tasks/' + id + '/analysis-meta')
+        .then(r2 => { if (!r2.ok) throw new Error('HTTP ' + r2.status); return r2.json(); })
+        .then(meta => {
+          if (meta && meta.available && id === currentTaskId) {
+            addAdviceButton(lastAssistant, meta, id);
+          }
+        })
+        .catch(() => { /* 元数据拉取失败：降级为不补挂（修复前现状），不打扰用户 */ });
+    }
   } catch (e) { reportClientError('switchTask', 'HISTORY_LOAD_FAILED', e); }
   input.focus();
 }
@@ -1022,9 +1038,11 @@ function addAdviceButton(el, adviceMeta, tid) {
   const runAdvice = () => {
     btn.disabled = true;
     btn.textContent = '解读中…';
-    setStatus('正在生成解读，大约需要十几秒', 'loading');
+    setStatus('正在生成解读，最长约 4 分钟', 'loading');
     const ctrl = new AbortController();
-    const timeoutId = setTimeout(() => ctrl.abort(), 45000);
+    // 兜底 abort 必须晚于后端解读预算（240s，web_server._LLM_ADVICE_TIMEOUT）：
+    // 前端先断只会给出笼统的「解读超时」，后端 240s 的「解读超时，可重试」才是准确文案。
+    const timeoutId = setTimeout(() => ctrl.abort(), 250000);
     fetch('/analysis/advice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
