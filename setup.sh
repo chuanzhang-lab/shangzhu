@@ -3,7 +3,7 @@
 #
 # 设计目标：无需关心当前目录，从任意位置直接跑都行。
 #   完整克隆： git clone <repo> && cd <repo> && bash setup.sh
-#   一行验证： gh repo clone chuanzhang-lab/claude && cd claude && bash setup.sh
+#   一行验证： gh repo clone chuanzhang-lab/shangzhu && cd shangzhu && bash setup.sh
 #
 # 幂等：可重复执行，不会覆盖已有配置、不会重建已有 .venv 内容。
 #
