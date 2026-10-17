@@ -10,7 +10,9 @@
 import json
 import pytest
 from fastapi.testclient import TestClient
+import web_server
 from web_server import app
+from session_state import reset_state
 
 
 @pytest.fixture
@@ -47,6 +49,39 @@ class TestGetAdvisor:
         """缺 tid 返回 422（FastAPI 标准校验错误）。"""
         r = client.get("/advisor")
         assert r.status_code == 422
+
+    def test_restores_persisted_params_before_building_advisor_scan(
+        self, client, valid_tid, monkeypatch,
+    ):
+        """空内存会话下，顾问必须从任务快照恢复已保存参数。"""
+        web_server.get_store().update_params(
+            valid_tid,
+            {
+                "total_investment": 180000,
+                "monthly_rent": 1800,
+                "daily_traffic": 80,
+                "price_per_unit": 18,
+                "variable_cost_ratio": 0.61,
+                "employee_count": 2,
+                "avg_salary": 2800,
+            },
+        )
+        reset_state(valid_tid)
+        captured = {}
+
+        async def fake_advise(scan, user_message, clean_view, advise_context, timeout):
+            captured.update(scan=scan, view=clean_view, context=advise_context)
+            return {"text": "", "ops": []}
+
+        monkeypatch.setattr(web_server, "_advise_with_timeout", fake_advise)
+        response = client.get(f"/advisor?tid={valid_tid}")
+
+        assert response.status_code == 200
+        scan_params = captured["scan"].get("params") or {}
+        assert scan_params.get("monthly_rent") == 1800
+        assert scan_params.get("daily_traffic") == 80
+        assert "monthly_rent" not in captured["context"]["missing_params"]
+        assert "daily_traffic" not in captured["context"]["missing_params"]
 
 
 class TestPreviewAdvisorAction:

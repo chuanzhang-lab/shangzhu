@@ -41,6 +41,7 @@ const DEFAULT_CAT = 'all';
 
 let currentCat = 'all';           // 当前激活分类
 let lastParams = null;            // 上一轮 params 快照（仅用于 UI：参数面板/对比预填/导出校验）
+let lastParamSources = null;
 let hasParams = false;            // 当前是否有项目参数
 let opsAvailable = false;         // 是否有待确认方案 A/B
 let userManualSwitch = false;     // 用户是否手动切过分类（防止自动抢焦点）
@@ -178,6 +179,7 @@ async function _loadTasksInner() {
         const tp = (cur && cur.params) || {};
         hasParams = Object.keys(tp).length > 0;
         lastParams = hasParams ? tp : null;
+        lastParamSources = null;
         updateCatDisabled(); updateBadges(); updateControls();
       }
     } else {
@@ -201,6 +203,7 @@ function clearChat() {
 }
 
 async function newTask() {
+  invalidateAdvisorRefresh();
   currentTaskId = null; let ok = false;
   try {
     const r = await fetch('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ name: '新任务' }) });
@@ -208,17 +211,21 @@ async function newTask() {
     const task = await r.json(); currentTaskId = task.id; ok = true;
   } catch (e) { reportClientError('newTask', 'TASK_CREATE_FAILED', e); currentTaskId = null; }
   if (!ok) { setToast('⚠️ 新建任务失败，请重试', '#d97706'); }
-  clearChat(); activeTaskUi(); loadTasks(); input.focus();
+  clearChat(); activeTaskUi(); loadTasks();
+  if (document.querySelector('.params-tab[data-tab="advisor"].active')) refreshAdvisor();
+  input.focus();
 }
 
 async function switchTask(id) {
   // 切任务时作废在飞请求：abort + 改 currentTaskId 双保险，旧响应在 send 内被丢弃
   if (activeCtrl) { try { activeCtrl.abort(); } catch (e) { /* abort 可能抛出，忽略 */ } }
+  invalidateAdvisorRefresh();
   currentTaskId = id; clearChat(); activeTaskUi();
   // 从「单一真相源」恢复本任务参数状态：有参数 → 改参/决策/对比可用，无 → 灰。
   // F2：先取缓存；若缓存缺失或为空但有消息历史，再从后端实时拉一次，避免陈旧快照
   //（此前 send() 产生参数后 tasksCache 不更新，切回时把真实参数态误判成「无参数」→ 上下文丢失）。
   await restoreTaskParams(id);
+  if (document.querySelector('.params-tab[data-tab="advisor"].active')) refreshAdvisor();
   try {
     const r = await fetch('/tasks/' + id + '/messages');
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -262,6 +269,7 @@ async function restoreTaskParams(id) {
   }
   hasParams = Object.keys(tp).length > 0;
   lastParams = hasParams ? tp : null;
+  lastParamSources = null;
   updateCatDisabled(); updateBadges(); updateControls();
   // 恢复右侧参数面板：任务快照只存 params（无 param_sources/derived），
   // 传 null 让面板只渲染「输入参数」段，来源标签缺省不显示。
@@ -641,7 +649,7 @@ function focusLatestOfCat(cat) {
 
 // ── 重置分类状态（切任务时）──
 function resetCatState() {
-  currentCat = 'all'; lastParams = null; hasParams = false; opsAvailable = false; userManualSwitch = false;
+  currentCat = 'all'; lastParams = null; lastParamSources = null; hasParams = false; opsAvailable = false; userManualSwitch = false;
   messageTags = [];
   CATS.forEach(c => drafts[c] = '');
   _compareDraft = {};   // F：切任务清对比草稿，防旧任务的草稿值污染新任务
@@ -809,6 +817,7 @@ function clearParamsPanel() { paramsList.innerHTML = '<p style="color:#999;font-
 // ── 顾问面板 ──
 let _advisorVersion = null;
 let _advisorRefreshTimer = null;
+let _advisorRequestSequence = 0;
 const advisorList = document.getElementById('advisor-list');
 
 function renderAdvisorPanel(data) {
@@ -884,21 +893,37 @@ function applyAdvisorAction(idx) {
 }
 
 let _advisorData = null;
+function advisorInputsSignature(params, sources) {
+  const entries = values => Object.keys(values || {}).sort().map(field => [field, values[field]]);
+  return JSON.stringify([entries(params), entries(sources)]);
+}
+
+function invalidateAdvisorRefresh() {
+  if (_advisorRefreshTimer !== null) clearTimeout(_advisorRefreshTimer);
+  _advisorRefreshTimer = null;
+  _advisorRequestSequence += 1;
+}
+
 function refreshAdvisor() {
   if (!currentTaskId) return;
-  // 防抖：5s 内不重复请求
-  if (_advisorRefreshTimer) return;
-  _advisorRefreshTimer = setTimeout(() => { _advisorRefreshTimer = null; }, 5000);
-  fetch('/advisor?tid=' + currentTaskId)
-    .then(r => r.json())
-    .then(d => {
-      _advisorData = d;
-      _advisorVersion = d.params_version;
-      renderAdvisorPanel(d);
-    })
-    .catch(() => {
-      if (advisorList) advisorList.innerHTML = '<div class="advisor-empty">顾问暂时不可用</div>';
-    });
+  if (_advisorRefreshTimer !== null) clearTimeout(_advisorRefreshTimer);
+  const requestedTaskId = currentTaskId;
+  const requestSequence = ++_advisorRequestSequence;
+  _advisorRefreshTimer = setTimeout(() => {
+    _advisorRefreshTimer = null;
+    fetch('/advisor?tid=' + encodeURIComponent(requestedTaskId))
+      .then(r => r.json())
+      .then(d => {
+        if (requestSequence !== _advisorRequestSequence || requestedTaskId !== currentTaskId) return;
+        _advisorData = d;
+        _advisorVersion = d.params_version;
+        renderAdvisorPanel(d);
+      })
+      .catch(() => {
+        if (requestSequence !== _advisorRequestSequence || requestedTaskId !== currentTaskId) return;
+        if (advisorList) advisorList.innerHTML = '<div class="advisor-empty">顾问暂时不可用</div>';
+      });
+  }, 250);
 }
 
 // Tab 切换
@@ -1145,17 +1170,24 @@ async function send() {
     }
 
     // ── 参数面板更新 ──
+    const advisorInputsChanged = !!data.params &&
+      advisorInputsSignature(data.params, data.param_sources) !==
+      advisorInputsSignature(lastParams, lastParamSources);
     if (data.params) updateParamsPanel(data.params, data.param_sources, data.derived);
 
     // ── 状态更新 ──
     if (data.params && Object.keys(data.params).length > 0) {
       hasParams = true;
       lastParams = data.params;
+      lastParamSources = data.param_sources || null;
       // F2：写回「单一真相源」——当前任务的真实参数立即同步进缓存
       if (currentTaskId) {
         tasksCache[currentTaskId] = tasksCache[currentTaskId] || {};
         tasksCache[currentTaskId].params = data.params;
       }
+    }
+    if (advisorInputsChanged && document.querySelector('.params-tab[data-tab="advisor"].active')) {
+      refreshAdvisor();
     }
     opsAvailable = !!data.ops_available;
     updateCatDisabled();

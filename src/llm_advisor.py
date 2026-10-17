@@ -430,10 +430,11 @@ def invalidate_llm_cache() -> None:
 def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, context: dict = None) -> dict:
     """基于结构化输出生成 LLM 解读（交互主持人模式）。
 
-    返回 {"text": 解读文本, "ops": [op...], "meta": {asked_question, made_recommendation}}：
+    返回 {"text": 解读文本, "ops": [op...], "meta": {asked_question, asked_params, made_recommendation}}：
     - text：自然语言解读（含追问/类比/翻译/推荐）
     - ops：若 LLM 输出了 ```ops 块则解析出的编排提议，由 web_server 渲染为确认流
-    - meta：告诉引擎侧 LLM 做了什么（用于更新计数器）
+    - meta：告诉引擎侧 LLM 做了什么（asked_params=追问的参数名列表，供挂 pending_question；
+      其余用于更新计数器）
 
     护栏（C3 红线，执行机制而非口号）：
     - 入参 scan / session_snapshot 一律先做 `copy.deepcopy` 只读副本，函数体
@@ -537,6 +538,10 @@ def advise(scan: dict, user_text: str = "", session_snapshot: dict = None, conte
             f"示例：\"月租大概多少？没概念的话先用 8000 算一下。\""
         )
         meta["asked_question"] = True
+        # 2026-10-15：把「追问了哪些参数」回传引擎侧——web_server 据此挂
+        # pending_question，/chat 的回答轮才能定向抽取（旧版只有布尔位，
+        # 回答进 /chat 后无处知道该收什么）。
+        meta["asked_params"] = list(priority_params)
     elif recommendation_count < 2 and available_actions:
         # 参数充足且推荐次数未满 -> 推荐一个动作
         # 排除「重新扫描(quick_scan)」与「对比(compare_scenarios)」，取第一个真正的下一步分析

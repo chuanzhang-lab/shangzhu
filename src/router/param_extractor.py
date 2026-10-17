@@ -579,6 +579,15 @@ def _extract_from_segment(segment: str, field_def: dict) -> Optional[float]:
                 continue
             value = _find_number(s, units, strict=strict)
             if value is not None:
+                # F8 补齐（2026-10-15）：max_value 原先只守阶段1，阶段2 兜底不守——
+                # 「人工总共6000」的 6000 无人称单位证据却进 employee_count，被
+                # _extract_labor_total 除出 avg_salary=1.0，>200 后处理只摘人数、
+                # 留下错值人均薪资入 session（静默错值，比吞答更严重）。
+                # 显式写了单位的（「3500人」）仍放行，交由守门层横幅拦截，不静默丢弃。
+                if max_value is not None and value > max_value:
+                    _vn = int(value) if float(value).is_integer() else value
+                    if not (units and re.search(rf"{_vn}\s*(?:{'|'.join(units)})", s)):
+                        continue
                 # 「3个月」不是金额：数字与「月」之间可夹「个」
                 if reject_units and "月" in reject_units:
                     vn = int(value) if float(value).is_integer() else None
@@ -820,7 +829,10 @@ def _extract_cost_ratio(text: str, params: dict) -> None:
         # 不是变动成本率（不能把「月固定成本占40%」算成 vcr=0.4）。
         r"(?<!固定)(?<!总)(?:食材|原料|材料|变动|可变|运营)?成本占"
         r"(?:(?:营业额|营收|收入)\s*)?(-?\d+(?:\.\d+)?)\s*(?!成)%?",
-        r"成本率\s*(?:为|是|到|改成|改为)?\s*(-?\d+(?:\.\d+)?)\s*(?!成)%?",
+        # 口语 hedge 对齐（2026-10-15）：「成本率大概40%」——「大概」类口语旧版
+        # 动词表不收，整句丢弃（追问「变动成本率多少」的自然回答句式）。
+        # 与 817 行食材侧已有的 (?:大概|大约|约)? 同构。
+        r"成本率\s*(?:为|是|到|改成|改为|变成|大概|大约|差不多|约|左右)?\s*(-?\d+(?:\.\d+)?)\s*(?!成)%?",
         # F1：变动成本/可变成本 + 明确比例语义（含「改为/改成/为/是/到」等动词，
         # 后面直接跟 0~100 的百分数）→ 归一化为 ratio。避免误抓「每份成本 45 元」。
         r"(?:变动成本率|可变成本率|变动成本|可变成本)\s*(?:为|是|到|改成|改为|变成)?\s*(-?\d{1,3}(?:\.\d+)?)\s*%",
@@ -882,7 +894,8 @@ def _extract_cn_fraction(text: str, params: dict) -> None:
     if params.get("variable_cost_ratio") is None:
         m = re.search(
             r"(?<!固定)(?<!总)(?:食材|原料|材料|变动|可变|运营)?成本"
-            r"(?:占|为|是|到)?\s*(?:(?:营业额|营收|收入)\s*)?" + num + r"\s*成(?!本)",
+            r"(?:占|为|是|到|改成|改为|变成|大概|大约|差不多|约|左右)?\s*"
+            r"(?:(?:营业额|营收|收入)\s*)?" + num + r"\s*成(?!本)",
             text,
         )
         if m:
@@ -891,8 +904,13 @@ def _extract_cn_fraction(text: str, params: dict) -> None:
                 params["variable_cost_ratio"] = ratio
 
     # 毛利率侧：通用字段会把「六成」抽成 6 → guard 归一 0.06，故此处必须**覆盖**。
+    # hedge 对齐（2026-10-15）：「毛利率大概六成」——「大概」隔断旧正则，通用兜底
+    # 抽 6 再归一 0.06（十倍错值静默入 session）。893 行注释自述的覆写需求
+    # 对带 hedge 的口语变体失效，此处补上。
     m = re.search(
-        r"(?:毛利率|毛利润率|毛利)\s*(?:为|是|有|到)?\s*" + num + r"\s*成", text)
+        r"(?:毛利率|毛利润率|毛利)\s*"
+        r"(?:为|是|有|到|改成|改为|变成|大概|大约|差不多|约|左右)?\s*" + num + r"\s*成",
+        text)
     if not m:
         m = re.search(
             num + r"\s*成\s*(?:的)?\s*(?:毛利率|毛利润率|毛利)", text)
@@ -1073,8 +1091,9 @@ def _extract_role_salary(text: str, params: dict) -> None:
 
 
 _LABOR_TOTAL_MARK = r"(?:一共|合计|加起来|总共|共计)"
+# 「2个创始人」不是员工（负向断言防 _extract_headcount 误落 employee_count）
 _HEADCOUNT_RE = re.compile(
-    r"(?<![每万])([两一二三四五六七八九十]|[0-9]{1,3})\s*个?人(?!均|次)"
+    r"(?<![每万])([两一二三四五六七八九十]|[0-9]{1,3})\s*个?人(?!均|次|创)"
 )
 
 
@@ -1085,10 +1104,39 @@ def _extract_headcount(text: str, params: dict) -> None:
     m = _HEADCOUNT_RE.search(text or "")
     if not m:
         return
+    # 「创始人数2人」：命中串前 4 字内含「创始」→ 是创始人不是员工（2026-10-15，
+    # 旧实现把创始人数误落 employee_count，静默错值）。
+    if "创始" in (text or "")[max(0, m.start() - 4):m.start()]:
+        return
     raw = m.group(1)
     n = float(raw) if raw.isdigit() else _parse_cn_number(raw)
     if n is not None and 0 <= n <= 200:
         params["employee_count"] = float(n)
+
+
+# ── 创始人数（founder_count）──────────────────────────────────────────────
+# 「创始人数2人 / 2个创始人 / 创始人有3位」→ founder_count。创始人≠员工
+# （不一定是雇员），与 employee_count 分流落位。
+_FOUNDER_COUNT_RE = re.compile(
+    r"(?:创始人|联合创始人|创始团队)\s*(?:人数|有|是|共|数)?\s*"
+    r"([0-9]+|[一二两三四五六七八九十]{1,3})\s*个?[人名位]"
+)
+_FOUNDER_COUNT_PREFIX_RE = re.compile(
+    r"([0-9]+|[一二两三四五六七八九十]{1,3})\s*个?[人名位]?\s*(?:的)?(?:联合)?创始人"
+)
+
+
+def _extract_founder_count(text: str, params: dict) -> None:
+    """创始人数 → founder_count（1~20，与 employee_count 分流）。"""
+    if params.get("founder_count") is not None or not text:
+        return
+    m = _FOUNDER_COUNT_RE.search(text) or _FOUNDER_COUNT_PREFIX_RE.search(text)
+    if not m:
+        return
+    raw = m.group(1)
+    n = float(raw) if raw.isdigit() else _parse_cn_number(raw)
+    if n is not None and 0 < n <= 20:
+        params["founder_count"] = n
 
 
 def _extract_labor_total(text: str, params: dict) -> None:
@@ -1153,6 +1201,177 @@ def _extract_annual_rent(text: str, params: dict) -> None:
     params["_rent_from_annual"] = True
 
 
+# ── 阶段（stage）同义词 → 规范值 ───────────────────────────────────────────
+# AI 追问「经营阶段」时用户回答「稳定经营 / 刚开业 / 准备扩张」——通用 pattern 表
+# 对这两字段零覆盖（2026-10-15 取证：11 种典型回答句式全部落 chitchat 被吞，
+# 用户参数越充足 AI 越必然追问它们）。规范值取 AI 追问话术自身的词表
+# （「刚开业（爬坡期）」），同义词归并：param_guard._values_conflict 对 str
+# 字段任何不同值即判矛盾，不归并会把「刚开业→爬坡期」误报成改参矛盾。
+# 否命题不得入值，两种模式都拦：
+# 1) 紧邻否定（2 字窗口）：「不准备扩张」「不是稳定经营」「尚未稳定经营」；
+# 2) 否定词 + ≤2 字过渡动词：「还没进入稳定经营期」「尚未达到稳定经营」
+#    （过渡动词白名单外的间隔词不拦，如「好不容易进入稳定经营」仍算肯定）。
+_STAGE_SYNONYMS = [
+    ("爬坡期", ["刚开业", "开店初期", "初创期", "初创", "启动期", "起步期", "新开店", "爬坡"]),
+    ("稳定经营", ["稳定经营", "稳定期", "成熟期", "经营中", "正常经营", "平稳期"]),
+    ("准备扩张", ["准备扩张", "打算扩张", "计划扩张", "想扩张", "要扩张", "扩张期"]),
+]
+_STAGE_NEGATION = ("不", "没", "无", "别", "莫", "未", "暂")
+_STAGE_TRANSITION = ("进入", "达到", "步入", "处于")
+
+
+def _stage_negated(text: str, idx: int) -> bool:
+    """阶段词命中点 idx 前是否带否命题（容过渡动词，见上方注释）。"""
+    if any(n in text[max(0, idx - 2):idx] for n in _STAGE_NEGATION):
+        return True
+    window = text[max(0, idx - 4):idx]
+    for n in _STAGE_NEGATION:
+        pos = window.rfind(n)
+        if pos != -1 and window[pos + len(n):] in _STAGE_TRANSITION:
+            return True
+    return False
+
+
+def _extract_stage(text: str, params: dict) -> None:
+    """「稳定经营 / 刚开业 / 准备扩张」→ stage 规范值（否命题跳过）。
+
+    多个阶段词同现时取**文本中最先出现的那个**，而非同义词表的遍历顺序：
+    「选稳定经营还是爬坡期好」里用户先说稳定经营，就不能因为「爬坡期」组
+    排在表头而替他选了后一个。
+
+    已知边界（2026-10-15 决定暂不拦截）：疑问句/选择句同样会入值——
+    「我该选稳定经营吗」「X还是Y好？」会抽出 stage。不拦的理由：用户表态句
+    常带疑问语气，一律拦会漏掉真实表态；且 stage 在 CN 仓仅展示/档案用途，
+    误抽会在回环确认行「已收到你的回答（经营阶段=…）」显式回显、可即时纠正。
+    若日后 stage 进入计算或误抽反馈变差，再补「还是/或者/该…吗/对比」护栏。
+    """
+    if params.get("stage") is not None or not text:
+        return
+    best_idx, best_val = None, None
+    for canonical, synonyms in _STAGE_SYNONYMS:
+        for syn in synonyms:
+            idx = text.find(syn)
+            if idx == -1 or _stage_negated(text, idx):
+                continue
+            if best_idx is None or idx < best_idx:
+                best_idx, best_val = idx, canonical
+    if best_val is not None:
+        params["stage"] = best_val
+
+
+# ── 分析月数（analysis_months）────────────────────────────────────────────
+# 「分析周期6个月 / 看12个月 / 未来6个月」→ int。追问回环（pending）里容忍
+# 整句即「N个月」——回答语境已由追问提供，无需重复语境词。
+# 拒绝语境：回本/回收/周转周期——那些「N个月」是回收期不是分析周期。
+# 上限 60：trend/cashflow 按期数逐期循环，防「600个月」巨量计算。
+_AM_CONTEXT = r"(?:分析周期|分析月数|周期|未来|看|预测|预计|规划)"
+_AM_HEDGE = r"(?:大概|大约|差不多|左右|约)?"
+_AM_NUM = r"([0-9]+|[一二两三四五六七八九十]{1,3})"
+_AM_REJECT = ("回本周期", "回收周期", "周转周期", "租期", "合同期")
+_AM_BARE_RE = re.compile(r"^\s*[选就按看]?\s*" + _AM_NUM + r"\s*个?月\s*[了吧左右]?\s*$")
+
+
+def _parse_analysis_months(text: str, allow_bare: bool = False) -> Optional[int]:
+    """解析分析月数（1~60）；allow_bare 仅用于 pending 追问回环。"""
+    if not text:
+        return None
+    if any(w in text for w in _AM_REJECT):
+        return None
+    m = re.search(_AM_CONTEXT + r"\s*" + _AM_HEDGE + r"\s*" + _AM_NUM + r"\s*个?月", text)
+    if not m and allow_bare:
+        m = _AM_BARE_RE.match(text)
+    if not m:
+        return None
+    raw = m.group(1)
+    val = float(raw) if raw.isdigit() else _parse_cn_number(raw)
+    if val is None:
+        return None
+    months = int(val)
+    return months if 1 <= months <= 60 else None
+
+
+def _extract_analysis_months(text: str, params: dict, allow_bare: bool = False) -> None:
+    """分析月数 → params["analysis_months"]（int，1~60）。"""
+    if params.get("analysis_months") is not None:
+        return
+    v = _parse_analysis_months(text, allow_bare=allow_bare)
+    if v is not None:
+        params["analysis_months"] = v
+
+
+# ── 裸营收词 + 口语 hedge ─────────────────────────────────────────────────
+# monthly_revenue 的 pattern 表只认「月营收/月收入/月流水…」前缀式；用户回答
+# 追问时常说裸「营收/流水」且带「大概」（「营收大概5万」「流水一个月5万」）——
+# 旧实现整句丢弃（2026-10-15 取证：chitchat + 空抽取）。
+# 日/天/年/每 前缀拒收：那是日营收（交 _extract_daily_revenue 折算）或年营收
+# （无字段，不猜）。
+_BARE_REVENUE_RE = re.compile(
+    r"(?<![日天年每])(?:营业额|营收|流水|收入|销售额)"
+    r"\s*(?:大概|大约|差不多|左右|约)?\s*(?:一个月|每月)?\s*"
+    r"(\d+(?:\.\d+)?)\s*([万千]?)"
+)
+
+
+def _extract_bare_revenue(text: str, params: dict) -> None:
+    """裸营收词（「营收大概5万」）→ monthly_revenue；已有月营收不覆盖。"""
+    if params.get("monthly_revenue") is not None or not text:
+        return
+    m = _BARE_REVENUE_RE.search(text)
+    if not m:
+        return
+    val = _parse_number(m.group(1) + (m.group(2) or ""))
+    if val and val > 0:
+        params["monthly_revenue"] = val
+
+
+def extract_named_params(text: str, fields: List[str]) -> Dict:
+    """按字段名定向抽取（pending 追问回环专用，2026-10-15）。
+
+    与 extract_params 的区别：调用方给出字段表；stage/analysis_months 走专用
+    抽取器且容忍裸「N个月」（回答语境已由追问提供，无需重复语境词）；其余
+    字段过滤 extract_params 的全量结果。只返回业务字段（滤下划线内部键）。
+
+    例外：`fields` 中的字段被守门层拦下（CRITICAL/需确认）时，extract_params
+    不会把它放进 cleaned（只留在 `_guard`），本函数会透出一份**精简 `_guard`**
+    （仅涉及这些字段）——调用方据此知道「用户答了，但值没落地」，
+    不能当成「用户没答」（否则追问状态会被误清，详见 web_server 步骤 1.7）。
+    """
+    if not text or not fields:
+        return {}
+    out: Dict = {}
+    full = extract_params(text)
+    for f in fields:
+        if f in ("stage", "analysis_months"):
+            continue
+        v = full.get(f)
+        if v is not None:
+            out[f] = v
+    if "stage" in fields:
+        probe: Dict = {}
+        _extract_stage(text, probe)
+        if "stage" in probe:
+            out["stage"] = probe["stage"]
+    if "analysis_months" in fields:
+        months = _parse_analysis_months(text, allow_bare=True)
+        if months is not None:
+            out["analysis_months"] = months
+    # 守门拦截的追问字段也要透出（values 不可信，只给「哪些字段被拦了」）
+    guard = full.get("_guard")
+    if isinstance(guard, dict):
+        blocked = {
+            i.get("field") for i in (guard.get("issues") or [])
+            if i.get("field") in fields
+            and (i.get("needs_confirmation") or i.get("level") == "critical")
+        }
+        if blocked:
+            out["_guard"] = {
+                "issues": [i for i in (guard.get("issues") or [])
+                           if i.get("field") in blocked],
+                "needs_confirmation": sorted(blocked),
+            }
+    return out
+
+
 def extract_params(text: str) -> Dict:
     """
     从自然语言提取项目参数。
@@ -1204,6 +1423,10 @@ def extract_params(text: str) -> Dict:
     #    必须在 _extract_traffic_unit 之前：日营收词明确时，数字是钱不是客流。
     _extract_daily_revenue(text, params)
 
+    # ── 补充抽取：裸营收词 + 口语 hedge（「营收大概5万」，2026-10-15）──
+    #    在日营收之后：两者语境互斥（裸词拒收日/天/年/每前缀），不抢词。
+    _extract_bare_revenue(text, params)
+
     # ── 补充抽取：客流单位（D8「每天卖100碗」→「碗」）──
     _extract_traffic_unit(text, params)
 
@@ -1217,12 +1440,22 @@ def extract_params(text: str) -> Dict:
     # ── 补充抽取：角色薪资（「厨师6000、服务员4500」→ 人均 5250）──
     _extract_role_salary(text, params)
 
+    # ── 创始人数（与 employee_count 分流，2026-10-15）──
+    #    先于 _extract_headcount：两者都有「N人」形态，靠语境词区分归属。
+    _extract_founder_count(text, params)
+
     # ── 「两个人工资一共1万2」：总额÷人数写人均，覆盖通用字段把总额当人均 ──
     _extract_headcount(text, params)
     _extract_labor_total(text, params)
 
     # ── 年租金/房租一年 → 月租 = 年额/12（覆盖把年额当月租）──
     _extract_annual_rent(text, params)
+
+    # ── 阶段 / 分析月数（AI 追问的两大字段，2026-10-15）──
+    #    必须在守门层之前：stage 为 str 字段无约束直通；analysis_months 抽 1~60。
+    #    无通用 pattern（_FIELD_PATTERNS 16 字段不含它们），走同义词/语境正则。
+    _extract_stage(text, params)
+    _extract_analysis_months(text, params, allow_bare=False)
 
     # 人数合理性：无「N人」证据却抽出超大人数（如 3500）时丢弃，避免污染 C1
     ec = params.get("employee_count")

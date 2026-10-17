@@ -56,9 +56,99 @@ try {
   await page.goto(BASE, { waitUntil: "networkidle" });
   await page.waitForSelector("#input", { timeout: 5000 });
 
+  // ── 断言 C：聊天参数变化后，已打开的顾问面板刷新判断 ──
+  await page.click("#new-task");
+  await page.waitForFunction(
+    () => document.querySelectorAll("#task-list .task-item").length > 0,
+    { timeout: 5000 },
+  );
+  let advisorCalls = 0;
+  await page.route("**/advisor?tid=*", async (route) => {
+    advisorCalls += 1;
+    const judgment = advisorCalls === 1
+      ? "目前还缺月租和日均客流。"
+      : advisorCalls === 3
+        ? "新任务的顾问判断。"
+        : advisorCalls === 4
+          ? "相同参数已为新任务重新判断。"
+          : "已读取月租 1800 元、日均客流 80 人。";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        judgment,
+        judgment_citations: [],
+        risks: [],
+        actions: [],
+        citations: [],
+        params_version: `e2e-${advisorCalls}`,
+      }),
+    });
+  });
+  await page.route("**/chat", async (route) => {
+    const request = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        content: "参数已更新。",
+        thread_id: request.task_id,
+        intent: "quick_scan",
+        params: { monthly_rent: 1800, daily_traffic: 80 },
+        param_sources: { monthly_rent: "[用户]", daily_traffic: "[用户]" },
+        derived: [],
+        ops_available: false,
+        params_version: 1,
+      }),
+    });
+  });
+  await page.locator('.params-tab[data-tab="advisor"]').click();
+  await page.waitForFunction(
+    () => document.querySelector(".advisor-judgment")?.textContent.includes("还缺月租"),
+    { timeout: 5000 },
+  );
+  const refreshedAdvisor = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/advisor" && response.ok(),
+  );
+  await page.fill("#input", "补充月租和客流");
+  await page.click("#send");
+  await refreshedAdvisor;
+  await page.waitForFunction(
+    () => document.querySelector(".advisor-judgment")?.textContent.includes("已读取月租"),
+    { timeout: 5000 },
+  );
+  if (advisorCalls < 2) fail("C: 参数更新后没有重新请求顾问判断");
+  else log("C: PASS — 参数更新后顾问判断已刷新");
+  const newTaskAdvisor = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/advisor" && response.ok(),
+  );
+  await page.click("#new-task");
+  await newTaskAdvisor;
+  await page.waitForFunction(
+    () => document.querySelector(".advisor-judgment")?.textContent.includes("新任务的顾问判断"),
+    { timeout: 5000 },
+  );
+  log("C: PASS — 顾问 tab 打开时切换到新任务会加载新判断");
+  const repeatedParamsAdvisor = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/advisor" && response.ok(),
+  );
+  await page.fill("#input", "再次提供相同参数");
+  await page.click("#send");
+  await repeatedParamsAdvisor;
+  await page.waitForFunction(
+    () => document.querySelector(".advisor-judgment")?.textContent.includes("相同参数已为新任务重新判断"),
+    { timeout: 5000 },
+  );
+  log("C: PASS — 新任务录入与上一任务相同的数值也会刷新");
+  await page.unroute("**/chat");
+  await page.unroute("**/advisor?tid=*");
+  await page.locator('.params-tab[data-tab="params"]').click();
+
   // ── 前置：结构化分析，拿到 AI 解读按钮 ──
   await page.fill("#input", "奶茶店月租金1万员工2人工资各5000客单价15日售50杯");
+  const analysisRequest = page.waitForRequest((request) => request.url().endsWith("/chat"));
   await page.click("#send");
+  const analysisTaskId = (await analysisRequest).postDataJSON().task_id;
   await page.waitForSelector(".advice-btn", { timeout: 15000 });
   log("advice-btn present on fresh analysis message");
 
@@ -95,11 +185,9 @@ try {
 
   // ── 断言 A：按钮出现 → 刷新+恢复历史 → 按钮仍在 ──
   await page.reload({ waitUntil: "networkidle" });
-  await page.waitForTimeout(800);
-  await page.evaluate(() => {
-    const el = document.querySelector("#task-list [data-id]") || document.querySelector("#task-list .task-item");
-    if (el) el.click();
-  });
+  const analysisTask = `#task-list [data-id="${analysisTaskId}"]`;
+  await page.waitForSelector(analysisTask, { timeout: 5000 });
+  await page.locator(analysisTask).first().click();
   await page.waitForTimeout(1500);
   const restored = await page.locator(".advice-btn").count();
   if (restored < 1) fail("A: 刷新+任务恢复后 AI 解读按钮消失（历史恢复未补挂）");

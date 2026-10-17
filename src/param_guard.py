@@ -296,6 +296,24 @@ def validate_field(field: str, value: Any, industry: Optional[str] = None) -> Di
 
     # 软边界：超出常识但可能合法 → WARNING
     if v < soft_min or v > soft_max:
+        # 软界外 ≥10 倍不是「超出常识」而是「数量级错误」（如人均薪资 1 元）：
+        # WARNING 仍会静默入 session，违背本模块「绝不静默」原则（docstring 16-21
+        # 行）→ 升级 CRITICAL 拦截 + 待确认。无 auto_fix：不猜修正值，
+        # 由用户确认后重报（2026-10-15：avg_salary=1.0 静默入 session 事故）。
+        # 10 倍内维持 WARNING 现状（合法极端值不受影响，如月租 60 万）。
+        far_below = soft_min > 0 and v < soft_min / 10
+        far_above = soft_max > 0 and v > soft_max * 10
+        if far_below or far_above:
+            result.update(
+                level=LEVEL_CRITICAL,
+                message=(
+                    f"{field}={v:g} 远低于常见区间下限 {soft_min:g}（{unit}）的 1/10，疑似笔误"
+                    if far_below else
+                    f"{field}={v:g} 远高于常见区间上限 {soft_max:g}（{unit}）的 10 倍，疑似笔误"
+                ) + " → 已拦截，不进入计算，请确认",
+                needs_confirmation=True,
+            )
+            return result
         result.update(
             level=LEVEL_WARNING,
             message=f"{field}={v:g} 超出常见区间 [{soft_min:g}, {soft_max:g}]（{unit}）",

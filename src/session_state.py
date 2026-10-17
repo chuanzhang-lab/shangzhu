@@ -380,6 +380,42 @@ def set_pending_ops(thread_id: str, ops: list) -> None:
             _SESSIONS[thread_id]["_pending_ops"] = ops
 
 
+# ── 追问挂起状态（AI 问过、等用户回答）────────────────────────────────────
+# 2026-10-15：追问由 POST /analysis/advice（前端「💡 AI 解读」按钮）或 chitchat
+# steward 生成，用户的回答进 /chat。旧行为两端点之间没有桥：回答句无意图
+# 关键词/无数值参数 → chitchat → steward → advice 空 → 兜底「请告诉我项目参数」，
+# 用户选的 stage/分析月数全程丢失（复现：tests/test_followup_answer_loop.py）。
+# 本状态挂上「问过哪些参数」，让 /chat 的回答轮走定向抽取 + 重算，而非吞答。
+# 生命周期：提问时挂 → 回答有收获时清/降级 → 新结构化分析产生时过期 → 重置清除。
+# 仅内存（与 _pending_ops/_last_analysis 同设计）：重启/4h TTL 后丢失，
+# 属已知遗留（低风险：用户重问即可，不丢已落账参数）。
+
+def set_pending_question(thread_id: str, params: list, source: str = "chat") -> None:
+    """原子写入 _pending_question（锁内，仿 set_pending_ops；空列表不挂）。"""
+    with _LOCK:
+        if thread_id in _SESSIONS and params:
+            _SESSIONS[thread_id]["_pending_question"] = {
+                "params": [p for p in params if p],
+                "source": source,
+            }
+
+
+def get_pending_question(thread_id: str) -> Optional[dict]:
+    """锁内读取挂起的追问（深拷贝）；无则 None。"""
+    import copy
+    with _LOCK:
+        st = _SESSIONS.get(thread_id)
+        pq = st.get("_pending_question") if st else None
+        return copy.deepcopy(pq) if pq else None
+
+
+def clear_pending_question(thread_id: str) -> None:
+    """锁内清除挂起的追问（已回答 / 已过期 / 会话重置）。"""
+    with _LOCK:
+        if thread_id in _SESSIONS:
+            _SESSIONS[thread_id].pop("_pending_question", None)
+
+
 def get_params_version(thread_id: str) -> int:
     """锁内读取写入版本号，供按需解读做 stale 校验。"""
     with _LOCK:
@@ -558,6 +594,10 @@ _CONTINUATION_HINTS = [
     "改成", "改为", "调整", "更新", "加上", "补上", "补充", "加上去",
     "改一下", "调一下", "更新一下", "换一下", "改成", "把",
     "那如果", "如果", "假如", "假设", "现在", "当前", "我的项目",
+    # 2026-10-15：「选」是用户主动改参的同义措辞（「经营阶段选『稳定经营』」），
+    # 旧版词表漏它 → 数值 10x~100x / 比例 50%~200% 变动带被误报「矛盾」假警报
+    # （param_guard._values_conflict 的 Direction 2 改主意权覆盖不全）。
+    "选",
 ]
 
 _RESET_HINTS = [

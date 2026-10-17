@@ -1707,6 +1707,15 @@ def cashflow_projection(params_json: str) -> str:
         one_time = raw.get("one_time_expenses") or []
         rhythm = raw.get("payment_rhythm") or {}
 
+        # 分析周期：用户指定 analysis_months 时按期数投影——与 trend_projection
+        # 同一消费范式（本文件 trend 侧 `params.get("analysis_months") or 12`）；
+        # 未给/非数值/越界 → 12。上限 60 与抽取器口径一致，防巨量期数。
+        # 2026-10-15：旧版硬编码 months=12，AI 追问所得的「分析周期」在现金流
+        # 链路没有消费点（装饰口径），用户答了也白答。
+        months_raw = state["params"].get("analysis_months")
+        user_specified = isinstance(months_raw, (int, float)) and 1 <= int(months_raw) <= 60
+        months = int(months_raw) if user_specified else 12
+
         result = _calc_cashflow_schedule(
             opening_cash=opening,
             monthly_revenue=monthly_revenue_value,
@@ -1714,12 +1723,14 @@ def cashflow_projection(params_json: str) -> str:
             monthly_expenses={"fixed": fixed, "variable": variable},
             one_time_expenses=one_time,
             payment_rhythm=rhythm,
-            months=12,
+            months=months,
         )
         result["project_type"] = state["params"].get("industry_name")
         result["opening_now"] = opening
         result["basis"] = state["basis"]
         result["notes"] = []
+        if user_specified:
+            result["notes"].append(f"分析周期：{months} 个月（按你指定）")
         if lag:
             result["notes"].append(f"收入按 {lag} 个月到账延迟计入")
         if rhythm.get("rent"):

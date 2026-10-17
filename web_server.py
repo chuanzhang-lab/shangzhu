@@ -64,7 +64,7 @@ if SRC_DIR not in __import__("sys").path:
 
 # 路由模块（不调 LLM）
 from router.intent import detect_intent
-from router.param_extractor import extract_params
+from router.param_extractor import extract_params, extract_named_params
 from router.formatter import format_response
 
 # Phase 3：跨轮会话状态（唯一真相源）+ 续算/重置识别 + LLM 接地上下文
@@ -87,6 +87,9 @@ from session_state import (
     get_params_version,
     set_last_analysis,
     get_last_analysis,
+    set_pending_question,
+    get_pending_question,
+    clear_pending_question,
 )
 
 # 工具（直调，不走 LLM）
@@ -235,6 +238,64 @@ _STATE_INTENTS = {"quick_scan", "suggest", "trend", "decide", "cashflow"}
 # 一次性/假设分析意图：本句抽出的参数不污染 session base
 _STATELESS_INTENTS = {"compare", "report_pdf", "report_excel", "market", "benchmark",
                        "attribution", "sensitivity"}
+
+# ── 追问-回答回环（⑪ · fix-followup-swallow-20261015）────────────────────
+# AI 追问由 /analysis/advice 或 chitchat steward 产生，用户的回答进 /chat。
+# 两端点之间靠 session_state._pending_question 搭桥（规格 docs/ARCHITECTURE.md §3.11）。
+#
+# 追问字段的展示名/提示语只服务两条用户可见文案：
+#   ① 回答确认行「✅ 已收到你的回答（经营阶段、分析月数），已按新参数重算：」
+#   ② 兜底重述「接着上面的问题——经营阶段（爬坡期/稳定经营/准备扩张）；分析周期，比如「6个月」」
+# 参数面板的字段标签在前端 app.js 的 fieldLabel()，那是另一处单一出处，勿混用。
+_PENDING_FIELD_LABELS = {
+    "stage": "经营阶段",
+    "analysis_months": "分析月数",
+    "avg_salary": "人均工资",
+    "monthly_revenue": "月营收",
+    "monthly_rent": "月租金",
+    "daily_traffic": "日均客流",
+    "price_per_unit": "客单价",
+    "employee_count": "员工人数",
+    "variable_cost_ratio": "变动成本率",
+    "total_investment": "总投资",
+    "gross_margin": "毛利率",
+}
+# 字段级提示：告诉用户「这一项该怎么答」。未列出的字段只回显字段名。
+_PENDING_FIELD_HINTS = {
+    "stage": "经营阶段（爬坡期/稳定经营/准备扩张）",
+    "analysis_months": "分析周期，比如「6个月」",
+    "avg_salary": "人均工资，比如「5000」",
+    "monthly_revenue": "月营收，比如「6万」",
+}
+
+
+def _restate_pending_question(params: list) -> str:
+    """兜底第一层：有 pending 时重述追问（字段级提示，不重复整段问题）。"""
+    hints = [
+        _PENDING_FIELD_HINTS.get(f) or _PENDING_FIELD_LABELS.get(f, f)
+        for f in params
+        if f
+    ]
+    return "接着上面的问题——" + "；".join(hints) + "。答完我按新参数重算。"
+
+
+def _summarize_params(params: dict, limit: int = 6) -> str:
+    """兜底第二层：把当前 session 的业务参数压成一行摘要（只读，不改状态）。
+
+    只列有限几条（limit）：这是兜底话术的补充，不是参数面板——
+    面板在前端 app.js，那一处才是完整单一出处。
+    """
+    items = []
+    for k, v in (params or {}).items():
+        if str(k).startswith("_") or k in ("industry", "city", "stage"):
+            continue
+        if v in (None, "", [], {}):
+            continue
+        label = _PENDING_FIELD_LABELS.get(k, k)
+        items.append(f"{label} {v}")
+        if len(items) >= limit:
+            break
+    return "、".join(items) if items else "（还没有有效参数）"
 
 # 安全限制：单条用户消息最大长度（字符数），防止极端输入拖垮引擎/LLM
 _MAX_INPUT_LENGTH = 10000
@@ -1272,13 +1333,18 @@ def _get_param_sources_for_advisor(tid: str) -> dict:
 
 @app.get("/advisor")
 async def get_advisor(tid: str):
-    """获取当前状态的 LLM 顾问建议（只读，不写状态）。
+    """获取当前状态的 LLM 顾问建议（不写持久化状态；空 session 时恢复任务快照）。
 
     触发方式：前端显式调用（用户点击「顾问」Tab）或参数哈希变化 + 防抖。
     返回：顾问面板 JSON（judgment / risks / actions / citations）。
     """
     if not tid or not _is_uuid(tid):
         return JSONResponse({"error": "无效 tid"}, status_code=400)
+
+    if not get_biz_snapshot(tid)["params"]:
+        task = get_store().get_task(tid)
+        if task:
+            hydrate_session(tid, task.get("params"), industry=task.get("industry"))
 
     clean_view = to_llm_view(tid)
     scan = _build_scan_for_advisor(tid)
@@ -1388,6 +1454,14 @@ async def post_analysis_advice(req: AdviceRequest):
         if m.get("asked_question"):
             _reset_advise_meta(tid)
             _incr_advise_meta(tid, "question_count")
+            # 追问端挂桥（⑪）：把「问过哪些参数」写进 session，/chat 的回答轮
+            # 据此定向抽取。asked_params 为空说明追问不针对具体字段，
+            # 挂了也接不住回答——直接清掉旧追问，避免陈问误导下一轮。
+            _asked = [p for p in (m.get("asked_params") or []) if p]
+            if _asked:
+                set_pending_question(tid, _asked, "advice")
+            else:
+                clear_pending_question(tid)
 
     ops_block = ""
     if ops_proposals:
@@ -1686,6 +1760,68 @@ async def chat(req: ChatRequest):
                         "thread_id": tid, "mode": "apply", "intent": "apply", "ok": False,
                     }, warn))
 
+        # ── 步骤 1.7: 追问-回答回环（⑪ · 2026-10-15）──────────────────────
+        # 修复的缺陷（取证 .workbuddy/reports/2026-10-14-cn-followup-swallow-forensics.md）：
+        # AI 的追问在 /analysis/advice，用户的回答进 /chat，两端点原本无桥 →
+        # 回答句「稳定经营，看6个月」无意图关键词/无数值参数 → chitchat →
+        # steward 空 → 兜底「请告诉我项目参数」，stage/analysis_months 100% 被吞。
+        #
+        # 机制（三层，规格 docs/ARCHITECTURE.md §3.11）：
+        #   ① 命中被追问字段 → extract_named_params 定向抽取 → apply_turn_guarded
+        #      （走守门，错值照拦）→ 未答字段降级保留 pending / 全答则清；
+        #   ② 「答了但被守门拦下」≠「没答」：被拦字段照旧留在 pending 继续追问，
+        #      同时把被拦值交给守门层复检，让横幅照出（否则用户看不到为何没落地）；
+        #   ③ 意图重放：本句不是项目意图时，改设为上一轮分析意图（_STATE_INTENTS
+        #      内）重算，而不是退回 chitchat 兜底。
+        # 未命中（用户聊别的/正常改参）→ 回环不介入，pending 原样保留。
+        _loop_hit = False
+        _answered_note = ""
+        _pending_q = get_pending_question(tid)
+        if _pending_q and _pending_q.get("params") and not is_reset_command(last_user_msg):
+            _asked = [p for p in _pending_q["params"] if p]
+            _named = extract_named_params(last_user_msg, _asked) if _asked else {}
+            _guard_named = _named.pop("_guard", None) or {}
+            # 被守门拦下的字段：值不可信，但「答过」这个事实必须记
+            _blocked = {
+                i.get("field"): i.get("value")
+                for i in (_guard_named.get("issues") or [])
+                if i.get("field") in _asked
+            }
+            if _named or _blocked:
+                _merge_in = dict(_named)
+                # 被拦值也送进守门层复检：generate 出 critical issue → 横幅「需确认」
+                _merge_in.update(
+                    {k: v for k, v in _blocked.items() if v is not None}
+                )
+                apply_turn_guarded(tid, _merge_in, last_user_msg, _named.get("industry"))
+                snap = get_biz_snapshot(tid)
+                guard_info = snap["pending_guard"]
+                merged = snap["params"]
+                if snap["industry"]:
+                    merged.setdefault("industry", snap["industry"])
+                # 落地判定必须排除被拦字段：被拦字段的旧值仍在 session 里，
+                # 不排除就会把「没落地」误判成「已落地」而误清追问（test_guard_blocked）。
+                _landed = [
+                    f for f in _asked
+                    if f not in _blocked and merged.get(f) not in (None, "", [], {})
+                ]
+                _remaining = [f for f in _asked if f not in _landed or f in _blocked]
+                if _remaining:
+                    set_pending_question(tid, _remaining, _pending_q.get("source") or "chat")
+                else:
+                    clear_pending_question(tid)
+                if _landed:
+                    _answered_note = (
+                        "✅ 已收到你的回答（"
+                        + "、".join(_PENDING_FIELD_LABELS.get(f, f) for f in _landed)
+                        + "），已按新参数重算："
+                    )
+                _last_intent = (get_last_analysis(tid) or {}).get("intent") or ""
+                if intent not in _PROJECT_INTENTS and _last_intent in _STATE_INTENTS:
+                    intent = _last_intent
+                    logger.info(f"追问回环：意图重放为上一轮分析意图 {intent}")
+                _loop_hit = True
+
         # ── 步骤 2: 业务意图 → 工具 + 模板（永不走自由 agent）──
         if intent in _PROJECT_INTENTS:
             try:
@@ -1700,6 +1836,10 @@ async def chat(req: ChatRequest):
             if routed is not None:
                 # 模板格式化
                 content = format_response(routed["intent"], routed["data"])
+                # 追问回环确认行：答过的字段显式回显，用户可即时发现抽错
+                # （抽取器误抽会在这一行暴露，见 param_extractor.py 阶段抽取注释）
+                if _answered_note:
+                    content = _answered_note + "\n\n" + content
                 ops_proposals = []  # 兜底：异常路径下 return 引用仍可用
                 # ── 守门高亮：把「待确认参数/矛盾」前置到内容最上方，不依赖 LLM ──
                 guard_banner = _render_guard_banner(guard_info, routed["data"])
@@ -1729,6 +1869,10 @@ async def chat(req: ChatRequest):
                     "scan": routed.get("data") or {},
                     "params": routed.get("params") or merged,
                 })
+                # 新的结构化分析产生 → 上一轮追问过期（回环自己管过的除外：
+                # 部分回答时 pending 已被降级保留，不能在这里被抹掉）
+                if not _loop_hit:
+                    clear_pending_question(tid)
                 warn = _persist_turn(store, tid, last_user_msg, content)
                 return JSONResponse(_with_persist_warning({
                     "content": content,
@@ -1789,13 +1933,40 @@ async def chat(req: ChatRequest):
             logger.warning(f"LLM 解读跳过: {e}")
         advice_text = advice_obj.get("text", "") if isinstance(advice_obj, dict) else (advice_obj or "")
         ops_proposals = advice_obj.get("ops", []) if isinstance(advice_obj, dict) else []
+        # 追问端挂桥（⑪）：steward 本轮追问也挂 pending，source=chat
+        if isinstance(advice_obj, dict) and advice_obj.get("meta"):
+            m = advice_obj["meta"]
+            if m.get("asked_question"):
+                _asked = [p for p in (m.get("asked_params") or []) if p]
+                if _asked:
+                    set_pending_question(tid, _asked, "chat")
+                else:
+                    clear_pending_question(tid)
         content = advice_text
         if not content:
-            # 无 API key 或无可解读内容时的友好降级（仍不引入自由 agent）
-            content = (
-                "本工作台专注创业项目结构化分析。请告诉我项目参数"
-                "（如月营收、总投资、人工成本、客单价），我来帮你测算收支平衡、跑道与利润。"
+            # 兜底话术三分层（⑪）：有 pending 重述追问 / 有 base 给参数摘要 /
+            # 空会话保留原通用引导话术（逐字不变——空会话语义不能被改）。
+            _pq = get_pending_question(tid)
+            _base_now = (snapshot.get("params") or {}) if isinstance(snapshot, dict) else {}
+            _has_base_now = any(
+                (not str(k).startswith("_")
+                 and k not in ("industry", "city", "stage")
+                 and v not in (None, "", [], {}))
+                for k, v in _base_now.items()
             )
+            if _pq and _pq.get("params"):
+                content = _restate_pending_question(_pq["params"])
+            elif _has_base_now:
+                content = (
+                    "这句我还在学习怎么答。\n\n"
+                    "当前已记下的参数：" + _summarize_params(_base_now) + "。\n"
+                    "可以继续改参数（如「月租金改成9000」），或问测算类的问题。"
+                )
+            else:
+                content = (
+                    "本工作台专注创业项目结构化分析。请告诉我项目参数"
+                    "（如月营收、总投资、人工成本、客单价），我来帮你测算收支平衡、跑道与利润。"
+                )
         if ops_proposals:
             base_params = snapshot.get("params", {}) if isinstance(snapshot, dict) else {}
             ops_block = _render_ops_block(ops_proposals, base_params, scan)

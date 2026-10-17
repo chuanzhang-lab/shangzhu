@@ -151,6 +151,76 @@ op_executor 草案。**抽取器已能处理精确改参（如「人工改为2*3
 
 ---
 
+### 3.11 追问-回答回环（⑪ · `session_state._pending_question` + `/chat` 步骤 1.7）
+
+**要解决的问题**：AI 的追问由「💡 AI 解读」按钮触发（`POST /analysis/advice`，
+app.js:1071），而用户的回答进 `POST /chat`——**分属两个端点，中间无状态桥**：
+
+```
+追问端 /analysis/advice ──（无状态）── 回答端 /chat
+  extract_params={} + detect_intent=chitchat + 无 pending
+  → steward → advice 空 → 兜底「本工作台专注…请告诉我项目参数」
+```
+
+用户刚答完追问却被告知「请告诉我项目参数」；`stage` / `analysis_months` 两参数
+100% 被吞（取证：`.workbuddy/reports/2026-10-14-cn-followup-swallow-forensics.md`）。
+
+**机制**（三层，按调用顺序）：
+
+```
+① 提问端挂状态
+   /analysis/advice：advice["meta"] 带 asked_question + asked_params
+     → set_pending_question(tid, asked_params, "advice")
+   /chat steward 分支：同一 meta 结构 → set_pending_question(..., "chat")
+
+② 回答端捕获（/chat 步骤 1.7，位于步骤 1.6 之后、步骤 2 意图路由之前）
+   pending = get_pending_question(tid)
+   targeted = extract_named_params(last_user_msg, pending["params"])
+     → apply_turn_guarded（走守门，错值照拦）
+     → 剩余未答字段降级 pending / 全答则 clear
+       （「答了但被守门拦下」也算未答：`extract_params` 会把 CRITICAL 字段从
+        cleaned 剔除，回环靠 `extract_named_params` 透出的精简
+        `_guard.needs_confirmation` 识别，否则会把受阻的答案当成没答而停止追问）
+     → answered_note「✅ 已收到你的回答（…），已按新参数重算：」
+     → 意图重放：非项目意图时改设为上一轮分析意图（_STATE_INTENTS 内），
+       否则 quick_scan → 落入既有结构化分支重算
+   compare/report 等一次性意图排除：那些句子是假设，不污染 session base
+
+③ 兜底话术三分层（chitchat 且 advice 空）
+   有 pending → 重述追问（字段级提示，_PENDING_HINTS）
+   有 base    → 「这句我还在学习怎么答」+ 参数摘要
+   都没有     → 原通用引导话术（空会话语义不变）
+```
+
+**抽取补齐**：`stage`（同义词→三个规范值，否命题含「没进入/未达到」过渡动词护栏；
+多个阶段词同现时取**文本中最先出现**的那个，而非同义词表组顺序）
+与 `analysis_months`（语境式；拒收回本/回收/租期/合同期；上限 60 防巨量期数）
+此前在 `field_model` 声明、`workflow_engine` 参与 `[缺失]` 标注，但抽取器零覆盖——
+AI 越追问，用户越答不上。`extract_named_params` 是 pending 回环专用入口：
+`stage`/`analysis_months` 走专用器（容忍整句即「N个月」），其余过滤 `extract_params`。
+
+**消费侧**：`cashflow_projection` 与 `trend_projection` 同范式消费 `analysis_months`
+（此前 cashflow 硬编码 12 期，用户指定的周期在现金流链路是装饰口径）。
+
+**超时双档（命名陷阱，勿合并）**：`_LLM_ADVISE_TIMEOUT = 8.0`（ADVI**S**E，闲聊
+steward 默认预算，产品口径「快问快答不等 LLM」）与 `_LLM_ADVICE_TIMEOUT = 240.0`
+（ADVI**C**E，解读端点显式传入）——两名字只差一个字母，2026-10-15 曾误判 8s 为死代码
+删掉它，导致 chitchat 全线 NameError。详见
+`docs/fix-ai-advice-timeout-240s-20261008.md` 底账「有意不同」行。
+
+**测试**：`tests/test_followup_answer_loop.py`（两轮 MRE / 部分回答降级 / 兜底三分层 /
+pending 不干扰正常 merge / 超时双档防呆）+ `tests/test_phase3_session_alignment.py`
+新增 9 条（stage 否命题 / analysis_months 边界 / hedge / 创始人 / guard 10x / cashflow 期数 /
+pending 生命周期）。
+
+**已知遗留**：
+- `pending_question` 仅内存（重启 / TTL 丢失）——与 `_pending_ops`、`_last_analysis`
+  同生命周期设计，持久化属存储层独立议题。
+- 「人工成本 6000」无人数时不映射 `avg_salary`（模型无「人工总额」字段，映射即猜测），
+  由 pending 重述给定向澄清。
+
+---
+
 ## 4. 已落地 vs 暂缓
 
 | 阶段 | 状态 | 内容 |
