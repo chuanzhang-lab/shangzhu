@@ -1998,9 +1998,20 @@ async def chat(req: ChatRequest):
 
 if __name__ == "__main__":
     import argparse
+    # 端口/监听地址：命令行 > 环境变量 > 本地默认。
+    # 托管部署（sites 沙箱）只注入 PORT 且要求绑定 0.0.0.0，故此处必须读环境变量；
+    # 本地默认仍保持 127.0.0.1 —— 不在部署场景里把服务暴露到局域网。
     parser = argparse.ArgumentParser(description="创业者工作台 — 本地 Web 服务 (A)")
-    parser.add_argument("-p", "--port", type=int, default=8081, help="HTTP 端口")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址")
+    parser.add_argument(
+        "-p", "--port", type=int,
+        default=int(os.getenv("PORT") or 8081),
+        help="HTTP 端口",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("HOST") or "127.0.0.1",
+        help="监听地址",
+    )
     args = parser.parse_args()
 
     # 启动前确保输出目录存在（报告/Excel 本地降级写入）
