@@ -15,13 +15,13 @@ A local-first financial modeling workbench for micro-entrepreneurs opening a noo
 **https://shangzhu-en.app.workbuddy.host/** —— 打开即用，手机也能访问。
 
 - 公开演示实例：数据**只存在浏览器会话内存里，不落服务端磁盘**，重启即弃
-- 未配置 LLM API Key，「AI 解读」自动跳过，引擎与界面照常工作（业务意图 0 次 LLM 调用）
-- 想本地跑完整功能（含 AI 解读），见下方「快速开始」
+- 演示实例已配置 LLM：「AI 解读」与闲聊可用（引擎业务意图仍 0 次 LLM 调用）；共享额度，请轻用
+- 想保存自己的测算、配自己的 API Key，见下方「快速开始」
 
 > 说明：这是演示实例，所有人共用一个任务视图——请勿输入真实的经营数据。
 > 要保存自己的测算，请按「快速开始」本地部署。
 
-**Version / 版本：`0.2.0`**
+**Version / 版本：`0.3.0`**
 
 ---
 
