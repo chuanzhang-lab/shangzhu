@@ -839,9 +839,38 @@ class TaskRename(BaseModel):
 
 
 # ─── FastAPI 应用 ──────────────────────────────────────────────────────────
+def warn_memory_multiworker() -> Optional[str]:
+    """M-01（2026-10 线上事故根因）：memory 档 + 多 worker → 跨轮会话必丢。
+
+    托管平台向 uvicorn 注入 WEB_CONCURRENCY>1 时，每个 worker 持有独立
+    MemoryStore/SessionState——同一会话的第 N 轮请求落到另一个 worker，
+    参数全丢（probe_zh_extract.py Part 3 实证：2 workers + memory，第 4 轮
+    params={}，客单价 18 消失）。单 worker 或 file/pg 档不受影响（磁盘/PG
+    跨进程共享）。lifespan 在每个 worker 进程里都会跑，所以告警挂在这里。
+    """
+    try:
+        from src.storage.dburl import resolve_store_backend
+
+        if resolve_store_backend() != "memory":
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    raw = (os.getenv("WEB_CONCURRENCY") or os.getenv("UVICORN_WORKERS") or "").strip()
+    if not raw.isdigit() or int(raw) <= 1:
+        return None
+    msg = (
+        f"STORE_BACKEND=memory 且多 worker（WEB_CONCURRENCY={raw}）：每个 worker "
+        "一份独立 MemoryStore，跨轮会话参数必丢（2026-10 线上事故实证）。"
+        "请设 WEB_CONCURRENCY=1 单 worker，或改 file/pg 档。"
+    )
+    logger.warning(msg)
+    return msg
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Web 服务启动：本地工作台模式（仅引擎层 + Engine Steward）")
+    warn_memory_multiworker()
     yield
     # R3/R4 修复：服务关闭时释放资源（文件描述符 + 数据库连接）
     # 2026-10-07：容错——STORE_BACKEND=pg 且 PG 已挂时 get_store() 会抛
@@ -1114,6 +1143,9 @@ async def health():
         "llm_configured": has_api_key(),
         "sessions": stats,
         "store_backend": store_backend,
+        # M-01：远程确认部署形态（多 worker + memory 是 2026-10 丢参数事故的
+        # 根因组合；null = 单 worker 或未注入，正常）。前端/排障一眼可查。
+        "web_concurrency": os.getenv("WEB_CONCURRENCY") or os.getenv("UVICORN_WORKERS"),
         "store_mode": diag.get("mode"),
         # ── 存储诊断（存储加固-3，T2/L2/Z3）──────────────────────────────
         # 降级不能只在服务端日志里：用户与前端要能直接看到「数据现在落在哪、

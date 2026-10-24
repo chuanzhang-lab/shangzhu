@@ -37,7 +37,7 @@ mv ../_keys_shangzhu_zh/agent_llm_config.json* config/
   "language": "python",
   "port": 8081,
   "installCmd": "pip install --ignore-requires-python -r requirements-deploy.txt",
-  "startCmd": "sh -c 'STORE_BACKEND=memory exec python3 -m uvicorn web_server:app --host 0.0.0.0 --port \"$PORT\"'",
+  "startCmd": "sh -c 'STORE_BACKEND=memory WEB_CONCURRENCY=1 exec python3 -m uvicorn web_server:app --host 0.0.0.0 --port \\\"$PORT\\\"'",
   "domainPrefix": "shangzhu",
   "appName": "创业者测算工作台"
 }
