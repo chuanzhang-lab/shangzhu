@@ -1346,6 +1346,87 @@ async def update_task_params(task_id: str, req: TaskParamsReq):
     }
 
 
+_FORM_SCHEMA_CACHE: Dict[str, Any] = {}
+
+
+@app.get("/form-schema")
+async def form_schema():
+    """M-04：表单 schema 投影（2026-10）。只读、零业务逻辑。
+
+    口径唯一真源 = field_model（INPUT_SPECS/DERIVED_SPECS/PARAM_GROUPS）+
+    config/industry_templates.yaml（M-06 模板预填用）。本端点只做投影——
+    一致性由 tests/test_form_schema.py 锁定，不许在这里另编字段清单。
+    formula/describe 等 lambda 不在投影白名单里，天然不外泄。
+    进程内缓存：field_model 是代码常量（进程内不变），模板 yaml 按
+    mtime 失效——热改配置文件即可生效，无需重启。
+    """
+    import hashlib
+
+    import yaml
+
+    from field_model import (
+        DERIVED_SPECS, INPUT_SPECS, OVERRIDABLE_FIELDS, PARAM_GROUPS,
+    )
+
+    tpl_path = os.path.join(SCRIPT_DIR, "config", "industry_templates.yaml")
+    mtime = os.path.getmtime(tpl_path)
+    cached = _FORM_SCHEMA_CACHE.get("payload")
+    if cached is not None and _FORM_SCHEMA_CACHE.get("mtime") == mtime:
+        return cached
+
+    with open(tpl_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    templates = raw.get("industry_templates", raw)
+
+    # 可编辑全集 = INPUT_SPECS ∪ OVERRIDABLE_FIELDS；override 独有字段
+    # （monthly_fixed_cost 不在 INPUT_SPECS——进 INPUT 会改变
+    # PURE_INPUT_FIELDS 的 A/B 分类语义）从 DERIVED_SPECS 借 label/unit。
+    editable = dict(INPUT_SPECS)
+    for name in OVERRIDABLE_FIELDS:
+        if name not in editable:
+            d = DERIVED_SPECS.get(name, {})
+            editable[name] = {
+                "label": d.get("label", name),
+                "unit": d.get("unit", ""),
+                "type": "float",
+            }
+    input_fields = [
+        {
+            "name": n,
+            "label": s["label"],
+            "unit": s.get("unit", ""),
+            "type": s.get("type", "float"),
+            "kind": "override" if n in OVERRIDABLE_FIELDS else "input",
+        }
+        for n, s in editable.items()
+    ]
+    derived_fields = [
+        {
+            "name": n,
+            "label": s.get("label", n),
+            "unit": s.get("unit", ""),
+            "kind": s.get("kind", "derived"),
+            "deps": list(s.get("deps", [])),
+            "user_direct_ok": bool(s.get("user_direct_ok", False)),
+        }
+        for n, s in DERIVED_SPECS.items()
+    ]
+    fingerprint = hashlib.sha256(
+        (repr(sorted(editable)) + repr(mtime)).encode("utf-8")
+    ).hexdigest()[:12]
+    payload = {
+        "version": fingerprint,
+        "input_fields": input_fields,
+        "derived_fields": derived_fields,
+        "groups": PARAM_GROUPS,
+        "templates": templates,
+    }
+    _FORM_SCHEMA_CACHE.clear()
+    _FORM_SCHEMA_CACHE["mtime"] = mtime
+    _FORM_SCHEMA_CACHE["payload"] = payload
+    return payload
+
+
 @app.get("/tasks/{task_id}/messages")
 async def get_task_messages(task_id: str):
     """取某任务的完整消息历史。"""

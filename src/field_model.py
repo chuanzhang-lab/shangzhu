@@ -243,6 +243,28 @@ DERIVED_SPECS: Dict[str, Dict[str, Any]] = {
 
 PURE_INPUT_FIELDS: set = set(INPUT_SPECS.keys())
 OVERRIDABLE_FIELDS: set = {name for name, spec in DERIVED_SPECS.items() if spec.get("kind") == "override"}
+
+# ── 表单分组（M-04，2026-10）：GET /form-schema 投影用，分组口径的 SSOT ──
+# 覆盖恰好 = INPUT_SPECS ∪ OVERRIDABLE_FIELDS（可编辑全集），测试锁定
+# （test_form_schema.py::test_groups_cover_all_editable_exactly——加字段
+#  忘了进组会红）。derived 只读区（annual_fixed_cost 等）不进组：表单
+# 里它们是「推算结果」展示区，不是输入项。
+PARAM_GROUPS: List[Dict[str, Any]] = [
+    {"id": "basic", "label": "基本情况", "fields": [
+        "industry", "stage", "analysis_months"]},
+    {"id": "revenue", "label": "收入", "fields": [
+        "daily_traffic", "price_per_unit", "monthly_revenue",
+        "unit_variable_cost", "variable_cost_ratio", "gross_margin",
+        "monthly_growth_rate", "seasonal_factor"]},
+    {"id": "cost", "label": "成本", "fields": [
+        "monthly_rent", "utilities", "packaging", "commission",
+        "other_fixed", "monthly_expense", "monthly_fixed_cost",
+        "equipment_ratio"]},
+    {"id": "labor", "label": "人工", "fields": [
+        "employee_count", "avg_salary", "labor_burden", "founder_count"]},
+    {"id": "cash", "label": "现金与投资", "fields": [
+        "total_investment", "monthly_profit"]},
+]
 PURE_DERIVED_FIELDS: set = {name for name, spec in DERIVED_SPECS.items() if spec.get("kind") == "derived"}
 
 # B 类字段依赖关系：当 A 类依赖字段变化时，清掉 B 类用户覆盖
