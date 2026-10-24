@@ -1092,13 +1092,31 @@ def _extract_role_salary(text: str, params: dict) -> None:
 
 _LABOR_TOTAL_MARK = r"(?:一共|合计|加起来|总共|共计)"
 # 「2个创始人」不是员工（负向断言防 _extract_headcount 误落 employee_count）
+# M-02（2026-10 线上事故）：负向断言从 均|次|创 扩到——
+#   前置 [每万天日]：挡「每天50人 / 每日30人 / 周日80人」（每天 N人 是客流）；
+#   前置 [0-9]：挡数字中途入场——「每天50人」的正则会在第二个数字 0 上
+#     重新匹配出「0人」（employee_count=0 的假值）；同理「3500人」旧版
+#     被截成 500。数字前还是数字 = 这是更长数字的尾巴，不是独立人数。
+#   后置 [/／]：挡「50 人/天」（N人/天 双写把真员工数洗掉的事故形态）。
 _HEADCOUNT_RE = re.compile(
-    r"(?<![每万])([两一二三四五六七八九十]|[0-9]{1,3})\s*个?人(?!均|次|创)"
+    r"(?<![每万天日0-9])([两一二三四五六七八九十]|[0-9]{1,3})\s*个?人(?!均|次|创|[/／])"
 )
+
+# M-02 语境标记：N人 前后的语境词决定它是员工数还是客流。雇佣词优先——
+# 「招3人」「请两个人」「员工80人」必须照旧成立（两面用例的防误拦侧）。
+_EMPLOY_MARK_RE = re.compile(r"招|雇|聘|请|员工|人工|工资|薪资|月薪|服务员|店员|厨师|合伙人")
+_GUEST_MARK_RE = re.compile(r"客人|顾客|来客|主顾|客流|来了|每天来|来店|上门|进店")
+_TRAFFIC_POST_RE = re.compile(r"来|消费|吃饭|用餐|就餐")
 
 
 def _extract_headcount(text: str, params: dict) -> None:
-    """「两个人 / 2个人」→ employee_count。不把「每人 / 万人」当人数。"""
+    """「两个人 / 2个人」→ employee_count。不把「每人 / 万人 / 客人 / 每天人」当人数。
+
+    M-02（2026-10 线上事故）：「客人80人」「来了80人」「每天50人」里的 N人
+    是客流不是员工——旧版一律落 employee_count（「客人80人」→员工80，系统
+    替用户编了个员工数；「50人/天」双写把真员工数洗掉）。语境分流：
+    雇佣词在前 → 照旧员工；客人/到店词在前或「人」后紧跟 来/消费 → 客流。
+    """
     if params.get("employee_count") is not None:
         return
     m = _HEADCOUNT_RE.search(text or "")
@@ -1109,6 +1127,18 @@ def _extract_headcount(text: str, params: dict) -> None:
     if "创始" in (text or "")[max(0, m.start() - 4):m.start()]:
         return
     raw = m.group(1)
+    pre = (text or "")[max(0, m.start() - 6):m.start()]
+    post = (text or "")[m.end():m.end() + 4]
+    if not _EMPLOY_MARK_RE.search(pre) and (
+        _GUEST_MARK_RE.search(pre) or _TRAFFIC_POST_RE.match(post)
+    ):
+        # 客人/到店语境：N人 是客流不是员工（事故同形态「客人80人」）。
+        # 只补位——daily_traffic 已有值（如「每天卖100碗」）时不覆盖。
+        if params.get("daily_traffic") is None:
+            n0 = float(raw) if raw.isdigit() else _parse_cn_number(raw)
+            if n0 is not None and 0 < n0 <= 10000:
+                params["daily_traffic"] = n0
+        return
     n = float(raw) if raw.isdigit() else _parse_cn_number(raw)
     if n is not None and 0 <= n <= 200:
         params["employee_count"] = float(n)
@@ -1124,6 +1154,27 @@ _FOUNDER_COUNT_RE = re.compile(
 _FOUNDER_COUNT_PREFIX_RE = re.compile(
     r"([0-9]+|[一二两三四五六七八九十]{1,3})\s*个?[人名位]?\s*(?:的)?(?:联合)?创始人"
 )
+
+
+# ── 客人语境客流（倒装）───────────────────────────────────────────────────
+# 「80个客人 / 80位客人」：数字在客人词前，_HEADCOUNT_RE 看不见（个/位截断），
+# 通用 keyword 表也不收（units 无「个」——加「个」会让「每天3个员工」误落
+# 客流）。独立正则；钱的语境（客人平均消费50元）数字位置在后，天然不匹配。
+_GUEST_TRAFFIC_INV_RE = re.compile(
+    r"([0-9]{1,4})\s*个?[位名]?\s*(?:客人|顾客|来客|主顾)"
+)
+
+
+def _extract_guest_traffic(text: str, params: dict) -> None:
+    """「80个客人」→ daily_traffic（M-02）。只补位，不覆盖已抽到的客流。"""
+    if not text or params.get("daily_traffic") is not None:
+        return
+    m = _GUEST_TRAFFIC_INV_RE.search(text)
+    if not m:
+        return
+    n = float(m.group(1))
+    if 0 < n <= 10000:
+        params["daily_traffic"] = n
 
 
 def _extract_founder_count(text: str, params: dict) -> None:
@@ -1439,6 +1490,9 @@ def extract_params(text: str) -> Dict:
 
     # ── 补充抽取：角色薪资（「厨师6000、服务员4500」→ 人均 5250）──
     _extract_role_salary(text, params)
+
+    # ── 客人倒装客流（M-02，2026-10）：「80个客人」headcount 看不见，先补位 ──
+    _extract_guest_traffic(text, params)
 
     # ── 创始人数（与 employee_count 分流，2026-10-15）──
     #    先于 _extract_headcount：两者都有「N人」形态，靠语境词区分归属。
