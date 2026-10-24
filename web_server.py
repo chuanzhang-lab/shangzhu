@@ -838,6 +838,15 @@ class TaskRename(BaseModel):
     name: str = Field(max_length=100)
 
 
+class TaskParamsReq(BaseModel):
+    """M-03：结构化表单改参请求。params 的值由守门层归一化——复用
+    apply_turn_guarded 全部语义（merge/守门/B 类覆盖/版本号），不许另起写路径。
+    raw 可空：表单提交没有原文。"""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    raw: str = Field(default="", max_length=2000)
+    industry: Optional[str] = Field(default=None, max_length=40)
+
+
 # ─── FastAPI 应用 ──────────────────────────────────────────────────────────
 def warn_memory_multiworker() -> Optional[str]:
     """M-01（2026-10 线上事故根因）：memory 档 + 多 worker → 跨轮会话必丢。
@@ -1296,6 +1305,45 @@ async def list_tasks():
 async def rename_task(task_id: str, req: TaskRename):
     get_store().rename_task(task_id, req.name)
     return {"ok": True, "id": task_id, "name": req.name}
+
+
+@app.put("/tasks/{task_id}/params")
+async def update_task_params(task_id: str, req: TaskParamsReq):
+    """M-03：结构化改参入口（表单主输入用，2026-10）。
+
+    铁律（执行简报「五个不许」第一条）：必须复用 apply_turn_guarded——
+    merge 语义 / 守门归一化（6000%→0.6 这类修正）/ B 类覆盖清理 / 矛盾
+    检测 / 锁内版本号全部继承。历史上「另写一条简单更新路径」是本项目
+    bug 之源，本路由的存在意义就是让表单走同一条经过 600+ 用例锤炼的
+    写入路径。契约见 tests/test_put_params_contract.py（含裸路径必死的
+    variable_cost_ratio=6000→0.6 断言）。
+    """
+    store = get_store()
+    if store.get_task(task_id) is None:
+        return JSONResponse(status_code=404,
+                            content={"ok": False, "error": "任务不存在"})
+    if not req.params:
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": "params 不能为空"})
+    try:
+        state, guard = apply_turn_guarded(task_id, req.params, req.raw, req.industry)
+    except Exception as e:  # noqa: BLE001
+        # 安全审查口径：异常原文可能含内部细节，只进日志不透传
+        logger.error(f"PUT params 任务 {task_id} 失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "参数更新失败，请查看服务日志"},
+        )
+    from session_state import get_params_version
+    business = {k: v for k, v in (state.get("params") or {}).items()
+                if not k.startswith("_")}
+    return {
+        "ok": True,
+        "id": task_id,
+        "params": business,
+        "guard": guard,
+        "params_version": get_params_version(task_id),
+    }
 
 
 @app.get("/tasks/{task_id}/messages")
