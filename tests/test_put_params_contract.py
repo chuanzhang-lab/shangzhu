@@ -110,6 +110,23 @@ def test_put_consecutive_versions_advance():
     assert v2 > v1, f"版本号未递增（{v1} → {v2}）——写入没进 apply_turn_guarded 的锁内路径"
 
 
+def test_put_persists_to_task_record():
+    """任务快照同步（M-03 缺口，form e2e 抓出）：PUT 后 /tasks 快照必须带上
+    新 params——否则刷新后 restoreTaskParams 从快照恢复成空表单，用户改的
+    参数静默蒸发。"""
+    tc = _client()
+    tid = _mk_task(tc)
+    r = tc.put(f"/tasks/{tid}/params",
+               json={"params": {"monthly_rent": 8000}}, headers=XHR)
+    assert r.status_code == 200
+    assert not r.json().get("persist_warning"), "无故障时不应有 persist_warning"
+    tasks = tc.get("/tasks").json()
+    t = next(x for x in tasks if x["id"] == tid)
+    assert (t.get("params") or {}).get("monthly_rent") == 8000, (
+        f"/tasks 快照未同步: {t.get('params')}"
+    )
+
+
 def test_put_response_shape():
     """响应形状契约（M-05 前端表单将依赖）：ok/id/params/guard/params_version。"""
     tc = _client()

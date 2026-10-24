@@ -1337,12 +1337,23 @@ async def update_task_params(task_id: str, req: TaskParamsReq):
     from session_state import get_params_version
     business = {k: v for k, v in (state.get("params") or {}).items()
                 if not k.startswith("_")}
+    # 任务快照同步（e2e 抓出的 M-03 缺口）：只更 session 态不落任务记录，
+    # 刷新后 restoreTaskParams 会从 /tasks 快照恢复成空表单——用户改的参数
+    # 静默蒸发。store.update_params 是 params-only 的 sanctioned 写路径
+    # （含 industry 同步加固 B2）。失败遵循 Z3：不静默，persist_warning 送达前端。
+    persist_warning = None
+    try:
+        store.update_params(task_id, business)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"PUT params 任务 {task_id} 快照同步失败: {e}")
+        persist_warning = "参数已生效，但持久化失败——刷新后可能回退，请重试"
     return {
         "ok": True,
         "id": task_id,
         "params": business,
         "guard": guard,
         "params_version": get_params_version(task_id),
+        **({"persist_warning": persist_warning} if persist_warning else {}),
     }
 
 
