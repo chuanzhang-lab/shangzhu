@@ -212,6 +212,10 @@ async function newTask() {
   } catch (e) { reportClientError('newTask', 'TASK_CREATE_FAILED', e); currentTaskId = null; }
   if (!ok) { setToast('⚠️ 新建任务失败，请重试', '#d97706'); }
   clearChat(); activeTaskUi(); loadTasks();
+  // M-05：新建任务即渲染空表单（缺参字段可填）。clearChat 的占位符在
+  // switchTask 路径由 restoreTaskParams 换掉，但 newTask 不走 switchTask，
+  // loadTasks 的 F2 分支只刷状态不碰面板——这里显式渲染一次。
+  if (currentTaskId) updateParamsPanel(null, null, null);
   if (document.querySelector('.params-tab[data-tab="advisor"].active')) refreshAdvisor();
   input.focus();
 }
@@ -943,35 +947,164 @@ document.querySelectorAll('.params-tab').forEach(tab => {
   });
 });
 
-function updateParamsPanel(params, paramSources, derived) {
-  if (!params || Object.keys(params).length === 0) { clearParamsPanel(); return; }
-  const inputFields = ['total_investment','monthly_rent','daily_traffic','price_per_unit','employee_count','avg_salary','variable_cost_ratio','labor_burden','utilities','packaging','commission','other_fixed'];
+// ── M-05：schema 驱动参数表单（2026-10）──
+// 口径唯一真源 = GET /form-schema（field_model 投影，M-04）。旧实现的两宗罪：
+// ① 硬编码 12 字段清单（加字段要改两处）；② 只渲染已有值（缺参字段永远
+// 没入口，用户只能靠自然语言补参——线上误抽事故的表单侧根源）。
+// 现在全字段常驻分节渲染，空字段直接可填，保存走 PUT /tasks/{id}/params
+// （M-03，复用 apply_turn_guarded 守门，不经对话理解层）。
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+let formSchema = null;                 // /form-schema 缓存（页面级一次）
+let formSchemaPromise = null;
+
+function ensureFormSchema() {
+  if (formSchema) return Promise.resolve(formSchema);
+  if (!formSchemaPromise) {
+    formSchemaPromise = fetch('/form-schema')
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(s => { formSchema = s; return s; })
+      .catch(e => { formSchemaPromise = null; throw e; });   // 失败不缓存，下次渲染重试
+  }
+  return formSchemaPromise;
+}
+
+// 0~1 比率字段（variable_cost_ratio 等）按用户心智显示成百分数：存 0.6 → 显 60；
+// 反向见 saveParamsForm（输入 >1 视为百分数 /100）。其余字段原样字符串。
+function formInputValue(spec, v) {
+  if (v === null || v === undefined || v === '' || (typeof v === 'number' && !Number.isFinite(v))) return '';
+  if (spec && spec.unit === '0~1' && typeof v === 'number') {
+    return String(Math.round(v * 100 * 1e4) / 1e4);
+  }
+  return String(v);
+}
+
+function renderParamsForm(schema, params, paramSources, derived) {
+  if (!currentTaskId) { clearParamsPanel(); return; }
+  const specByName = {};
+  schema.input_fields.forEach(f => { specByName[f.name] = f; });
   let html = '';
-  html += '<div class="param-section">输入参数</div>';
-  inputFields.forEach(f => {
-    if (params[f] !== undefined && params[f] !== null) {
+  schema.groups.forEach((g, gi) => {
+    const hasValue = g.fields.some(f => params[f] !== undefined && params[f] !== null && params[f] !== '');
+    const open = hasValue || gi === 0;                    // 有值的节展开；基本情况常开
+    html += '<details class="pf-section"' + (open ? ' open' : '') + '><summary>' + esc(g.label) + '</summary>';
+    g.fields.forEach(f => {
+      const spec = specByName[f] || { name: f, label: f, unit: '', type: 'float' };
+      const v = params[f];
       const src = (paramSources || {})[f] || '';
-      // 来源标签：无来源信息（历史快照恢复）时不渲染，避免误标「推算」
+      // 来源标签：有来源信息才标（历史快照恢复无 sources，不误标——同旧实现口径）
       let srcHtml = '';
       if (src) {
         const srcClass = src.startsWith('[用户]') ? 'psrc-user' : src.startsWith('[缺失]') ? 'psrc-missing' : 'psrc-derived';
         const srcLabel = src.startsWith('[用户]') ? '用户' : src.startsWith('[缺失]') ? '缺失' : '推算';
         srcHtml = '<span class="psrc ' + srcClass + '">' + srcLabel + '</span>';
       }
-      const hl = (f === recentlyUpdatedField) ? ' just-updated' : '';   // F3 变更高亮
-      html += '<div class="param-row' + hl + '"><span class="pname">' + fieldLabel(f) + '</span><span style="display:flex;align-items:center;gap:6px;">' + srcHtml + '<span class="pval" style="cursor:default;">' + formatVal(f, params[f]) + '</span></span></div>';
-    }
+      const unitHtml = spec.unit === '0~1' ? '<span class="punit">%</span>'
+        : (spec.unit ? '<span class="punit">' + esc(spec.unit) + '</span>' : '');
+      const hl = (f === recentlyUpdatedField) ? ' just-updated' : '';   // F3 变更高亮（表单版）
+      html += '<div class="param-row pf-row' + hl + '"><span class="pname">' + esc(spec.label) + ' ' + unitHtml + '</span>'
+        + '<span style="display:flex;align-items:center;gap:6px;">' + srcHtml
+        + '<input class="pf-input" data-field="' + esc(f) + '" inputmode="decimal"'
+        + (spec.unit === '0~1' ? ' placeholder="如 60"' : '')
+        + ' value="' + esc(formInputValue(spec, v)) + '"></span></div>';
+    });
+    html += '</details>';
   });
+  // 派生只读区：沿用 /chat 下发的 derived（ok=精确推算 / missing=缺哪些即可算）
   if (derived && derived.length > 0) {
     const okDerived = derived.filter(d => d.status === 'ok');
     const missDerived = derived.filter(d => d.status === 'missing');
     if (okDerived.length > 0) { html += '<div class="param-section">精确推算</div>';
-      okDerived.forEach(d => { html += '<div class="param-row"><span class="pname">' + d.label + '</span><span style="display:flex;align-items:center;gap:6px;"><span class="psrc psrc-derived">推算</span><span class="pval" style="color:#666;cursor:default;">' + formatNum(d.value) + ' ' + (d.unit||'') + '</span></span></div>'; }); }
+      okDerived.forEach(d => { html += '<div class="param-row"><span class="pname">' + esc(d.label) + '</span><span style="display:flex;align-items:center;gap:6px;"><span class="psrc psrc-derived">推算</span><span class="pval" style="color:#666;cursor:default;">' + formatNum(d.value) + ' ' + esc(d.unit || '') + '</span></span></div>'; }); }
     if (missDerived.length > 0) { html += '<div class="param-section">缺失（补充即可算）</div>';
-      missDerived.forEach(d => { html += '<div class="param-row"><span class="pname">' + d.label + '</span><span class="psrc psrc-missing">缺 ' + (d.missing||'') + '</span></div>'; }); }
+      missDerived.forEach(d => { html += '<div class="param-row"><span class="pname">' + esc(d.label) + '</span><span class="psrc psrc-missing">缺 ' + esc(d.missing || '') + '</span></div>'; }); }
   }
+  html += '<div class="pf-footer"><button class="pf-save">保存改动</button>'
+    + '<span class="pf-note">直接写入参数，不经对话理解层</span></div>';
   paramsList.innerHTML = html;
 }
+
+function updateParamsPanel(params, paramSources, derived) {
+  // 无任务时保持占位；有任务时即使零参数也渲染全量表单（缺参字段可填——M-05 验收）
+  if (!currentTaskId) { clearParamsPanel(); return; }
+  ensureFormSchema()
+    .then(schema => renderParamsForm(schema, params || {}, paramSources, derived))
+    .catch(e => {
+      reportClientError('updateParamsPanel', 'SCHEMA_LOAD_FAILED', e);
+      paramsList.innerHTML = '<p style="color:#d97706;font-size:13px;padding:12px 0;">参数表单加载失败，请刷新重试</p>';
+    });
+}
+
+// 表单保存：只提交改动过的非空字段（F4 精神），数字校验 + 0~1 比率归一，
+// 走 PUT（apply_turn_guarded 守门在服务端兜底）。
+async function saveParamsForm() {
+  if (!currentTaskId || !formSchema) return;
+  const specByName = {};
+  formSchema.input_fields.forEach(f => { specByName[f.name] = f; });
+  const inputs = paramsList.querySelectorAll('input[data-field]');
+  const payload = {};
+  let changed = 0;
+  const bad = [];
+  inputs.forEach(inp => {
+    const f = inp.dataset.field;
+    const spec = specByName[f] || {};
+    const raw = inp.value.trim();
+    if (!raw) return;                                   // 空输入不提交
+    const cur = lastParams ? lastParams[f] : null;
+    if (raw === formInputValue(spec, cur)) return;      // 未改动不发
+    if (f === 'stage' || f === 'industry') { payload[f] = raw; changed++; return; }
+    const n = Number(raw.replace(/[,，%％\s]/g, ''));
+    if (!Number.isFinite(n)) { bad.push(spec.label || f); return; }
+    // 用户按百分数输入（60）→ 0~1 比率归一为 0.6；≤1 原样（0.6 也是合法输入）
+    payload[f] = (spec.unit === '0~1' && n > 1) ? Math.round(n / 100 * 1e6) / 1e6 : n;
+    changed++;
+  });
+  if (bad.length) { setToast('⚠️ ' + bad.join('、') + ' 不是有效数字，未保存', '#d97706'); return; }
+  if (changed === 0) { setToast('未检测到改动'); return; }
+  try {
+    const r = await fetch('/tasks/' + currentTaskId + '/params', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ params: payload }),
+    });
+    const data = await r.json().catch(() => null);
+    if (!r.ok || !data || !data.ok) throw new Error('HTTP ' + r.status);
+    // 本地真相源同步：params 快照 + 任务缓存 + [用户] 来源标
+    lastParams = Object.assign({}, lastParams || {}, data.params);
+    if (!lastParamSources) lastParamSources = {};
+    Object.keys(payload).forEach(f => { lastParamSources[f] = '[用户] 表单'; });
+    if (tasksCache[currentTaskId]) tasksCache[currentTaskId].params = Object.assign({}, tasksCache[currentTaskId].params, data.params);
+    hasParams = Object.keys(lastParams).length > 0;
+    updateCatDisabled(); updateBadges(); updateControls();
+    const g = data.guard || {};
+    if (data.persist_warning) {
+      setToast('⚠️ ' + data.persist_warning, '#d97706');   // Z3：落盘失败必须可见
+    } else if (g.needs_confirmation && g.needs_confirmation.length) {
+      setToast('已保存，引擎提示请确认：' + g.needs_confirmation.join('；'), '#d97706');
+    } else if (g.has_critical) {
+      setToast('已保存，但有参数被引擎修正（原值超常见区间）', '#d97706');
+    } else {
+      setToast('已保存 ' + changed + ' 项');
+    }
+    updateParamsPanel(data.params, lastParamSources, null);
+  } catch (e) {
+    reportClientError('saveParamsForm', 'PUT_FAILED', e);
+    setToast('⚠️ 保存失败，请稍后重试', '#d97706');
+  }
+}
+
+// 保存按钮 + 输入回车（IME 组合防护同 F4）：paramsList 内容每次重建，用事件委托
+paramsList.addEventListener('click', e => {
+  if (e.target && e.target.classList && e.target.classList.contains('pf-save')) saveParamsForm();
+});
+paramsList.addEventListener('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Enter' && e.target && e.target.dataset && e.target.dataset.field) {
+    e.preventDefault();
+    saveParamsForm();
+  }
+});
 
 function fieldLabel(f) {
   const labels = { total_investment:'总投资', monthly_rent:'月租金', daily_traffic:'日均客流', price_per_unit:'客单价', employee_count:'员工人数', avg_salary:'人均薪资', variable_cost_ratio:'变动成本率', labor_burden:'劳动负担率', utilities:'水电', packaging:'包装', commission:'提成', other_fixed:'其他固定' };

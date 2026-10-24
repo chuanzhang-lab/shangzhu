@@ -43,6 +43,7 @@ lint:
 e2e:
 	node tests/e2e/smoke.mjs
 	node tests/e2e/advice.mjs
+	node tests/e2e/form.mjs
 
 compile:
 	$(PY) -m compileall -q src web_server.py tests
