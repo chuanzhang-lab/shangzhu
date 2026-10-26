@@ -55,6 +55,9 @@ try {
   const page = await browser.newPage();
   await page.goto(BASE, { waitUntil: "networkidle" });
   await page.waitForSelector("#input", { timeout: 5000 });
+  // M-07：本文件测顾问生命周期，不测 NL 输入路径——设「NL 免确认」跳过确认层
+  // （默认路径的 e2e 归 confirm.mjs 管），保持参数直接进引擎的原断言口径。
+  await page.evaluate(() => localStorage.setItem("nl_confirm_skip", "1"));
 
   // ── 断言 C：聊天参数变化后，已打开的顾问面板刷新判断 ──
   await page.click("#new-task");

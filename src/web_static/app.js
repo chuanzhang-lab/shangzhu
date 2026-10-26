@@ -950,6 +950,7 @@ let formSchema = null;                 // /form-schema 缓存（页面级一次�
 let formSchemaPromise = null;
 let currentIndustry = '';              // M-06：当前选择的行业模板（预填 / benchmark / 按节重置）
 let draftDefaultFields = {};           // M-06：预填草稿字段集 → [默认] 标（保存后转 [用户]）
+let pendingNLParams = null;            // M-07：NL 抽取待确认参数 {field: value}（确认前不进引擎）
 
 function ensureFormSchema() {
   if (formSchema) return Promise.resolve(formSchema);
@@ -992,6 +993,13 @@ function renderParamsForm(schema, params, paramSources, derived) {
       if (benchRows) html += '<div class="pf-bench"><div class="pf-bench-title">' + esc(indShown) + ' 参考基准</div>' + benchRows + '</div>';
     }
   }
+  // M-07 确认条：NL 抽取待确认（未进引擎）；确认开算=saveParamsForm（PUT 唯一真源）
+  const pendingCount = Object.keys(pendingNLParams || {}).length;
+  if (pendingCount) {
+    html += '<div class="pf-confirm"><span class="pf-confirm-note">识别到 ' + pendingCount + ' 项参数待确认（未进引擎）</span>'
+      + '<button type="button" class="pf-confirm-ok">确认开算</button>'
+      + '<button type="button" class="pf-confirm-ignore">忽略</button></div>';
+  }
   schema.groups.forEach((g, gi) => {
     const hasValue = g.fields.some(f => params[f] !== undefined && params[f] !== null && params[f] !== '');
     const open = hasValue || gi === 0;                    // 有值的节展开；基本情况常开
@@ -1000,11 +1008,14 @@ function renderParamsForm(schema, params, paramSources, derived) {
       + (gTplFields.length ? ' <button type="button" class="pf-reset" data-group="' + gi + '">重置为模板默认</button>' : '') + '</summary>';
     g.fields.forEach(f => {
       const spec = specByName[f] || { name: f, label: f, unit: '', type: 'float' };
-      const v = params[f];
+      // M-07：待确认字段显示 pending 值（覆盖引擎现值——展示的就是等待确认的数）
+      const v = (pendingNLParams && pendingNLParams[f] !== undefined) ? pendingNLParams[f] : params[f];
       const src = (paramSources || {})[f] || '';
       // 来源标签：有来源信息才标（历史快照恢复无 sources，不误标——同旧实现口径）
       let srcHtml = '';
-      if (src) {
+      if (pendingNLParams && pendingNLParams[f] !== undefined) {
+        srcHtml = '<span class="psrc psrc-pending">待确认</span>';   // M-07：NL 抽取待确认（未进引擎）
+      } else if (src) {
         const srcClass = src.startsWith('[用户]') ? 'psrc-user' : src.startsWith('[缺失]') ? 'psrc-missing' : 'psrc-derived';
         const srcLabel = src.startsWith('[用户]') ? '用户' : src.startsWith('[缺失]') ? '缺失' : '推算';
         srcHtml = '<span class="psrc ' + srcClass + '">' + srcLabel + '</span>';
@@ -1031,7 +1042,9 @@ function renderParamsForm(schema, params, paramSources, derived) {
     if (missDerived.length > 0) { html += '<div class="param-section">缺失（补充即可算）</div>';
       missDerived.forEach(d => { html += '<div class="param-row"><span class="pname">' + esc(d.label) + '</span><span class="psrc psrc-missing">缺 ' + esc(d.missing || '') + '</span></div>'; }); }
   }
+  const skipConfirm = localStorage.getItem('nl_confirm_skip') === '1';
   html += '<div class="pf-footer"><button class="pf-save">保存改动</button>'
+    + '<label class="pf-skip"><input type="checkbox" id="pf-skip-confirm"' + (skipConfirm ? ' checked' : '') + '> NL 免确认直接生效</label>'
     + '<span class="pf-note">直接写入参数，不经对话理解层</span></div>';
   paramsList.innerHTML = html;
 }
@@ -1066,6 +1079,7 @@ async function submitParams(payload, changed) {
     hasParams = Object.keys(lastParams).length > 0;
     updateCatDisabled(); updateBadges(); updateControls();
     recentlyUpdatedField = (changed === 1) ? Object.keys(payload)[Object.keys(payload).length - 1] : null;   // F3 高亮迁移：结构化保存触发
+    pendingNLParams = null;                                 // M-07：任何结构化保存即确认，pending 清空
     const g = data.guard || {};
     if (data.persist_warning) {
       setToast('⚠️ ' + data.persist_warning, '#d97706');   // Z3：落盘失败必须可见
@@ -1115,6 +1129,11 @@ async function saveParamsForm() {
 // 保存按钮 + 按节重置 + 输入回车（IME 组合防护同 F4）：paramsList 内容每次重建，用事件委托
 paramsList.addEventListener('click', e => {
   if (e.target && e.target.classList && e.target.classList.contains('pf-save')) saveParamsForm();
+  if (e.target && e.target.classList && e.target.classList.contains('pf-confirm-ok')) saveParamsForm();   // M-07 确认开算 = PUT 唯一真源，不另写提交路径
+  if (e.target && e.target.classList && e.target.classList.contains('pf-confirm-ignore')) {
+    pendingNLParams = null;                                 // M-07 忽略：回滚表单到引擎现值，不落库
+    ensureFormSchema().then(schema => renderParamsForm(schema, lastParams || {}, lastParamSources, null)).catch(() => {});
+  }
   if (e.target && e.target.classList && e.target.classList.contains('pf-reset')) {
     e.preventDefault();                                    // 阻止 <summary> 折叠联动
     resetSectionToTemplate(Number(e.target.dataset.group));
@@ -1171,6 +1190,10 @@ function resetSectionToTemplate(gi) {
 }
 
 paramsList.addEventListener('change', e => {
+  if (e.target && e.target.id === 'pf-skip-confirm') {
+    localStorage.setItem('nl_confirm_skip', e.target.checked ? '1' : '');
+    setToast(e.target.checked ? 'NL 参数将免确认直接进引擎' : 'NL 参数需经表单确认后进引擎');
+  }
   if (e.target && e.target.id === 'pf-industry') {
     currentIndustry = e.target.value || '';
     draftDefaultFields = {};                               // 换行业 = 换草稿基线，旧 [默认] 标清空
@@ -1316,6 +1339,8 @@ async function send() {
   try {
     const body = { messages: [{ role: 'user', content: text }] };
     if (currentTaskId) body.task_id = currentTaskId;
+    // M-07 确认层：产品默认开（事故 2026-10-03 教训）；跳过开关只改真假值，字段不缺席
+    body.nl_confirm = localStorage.getItem('nl_confirm_skip') !== '1';
     const resp = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body), signal: ctrl.signal });
     if (!resp.ok) {
       const err = await resp.text();
@@ -1348,6 +1373,10 @@ async function send() {
     if (data.ai_advice && data.ai_advice.available) {
       addAdviceButton(placeholder, data.ai_advice, data.thread_id || currentTaskId);
     }
+
+    // ── M-07 NL 确认层：抽取结果进表单待确认（不确认不进引擎）──
+    // 置于参数面板更新之前：面板重渲染时 pending 值/待确认标/确认条一并渲染
+    pendingNLParams = (data.confirm_required && data.pending_params) ? data.pending_params : null;
 
     // ── 参数面板更新 ──
     const advisorInputsChanged = !!data.params &&

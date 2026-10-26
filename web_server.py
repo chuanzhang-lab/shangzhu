@@ -820,6 +820,10 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(max_length=100)
     thread_id: Optional[str] = "default"
     task_id: Optional[str] = None
+    # M-07 NL 确认层（2026-10）：True=抽取结果先回表单待确认（不进引擎）。
+    # None=未声明 → 旧调用方/测试走原合并路径（API 兼容）；前端按设置显式
+    # 发送 True（产品口径「确认层默认开」）或 False（跳过开关）。
+    nl_confirm: Optional[bool] = None
 
 
 class AdviceRequest(BaseModel):
@@ -1787,6 +1791,26 @@ def _with_persist_warning(payload: dict, warn: Optional[str]) -> dict:
     return payload
 
 
+def _confirm_pending_content(pending: dict) -> str:
+    """M-07 确认层提示文案：字段名取 field_model.INPUT_SPECS（SSOT，不另编清单）。
+    INPUT_SPECS 形状 = {name: spec_dict}（同 /form-schema 的 dict() 口径）。"""
+    from field_model import INPUT_SPECS
+
+    items = []
+    for k, v in pending.items():
+        spec = INPUT_SPECS.get(k) or {}
+        label = spec.get("label") or k
+        if spec.get("unit") == "0~1" and isinstance(v, (int, float)):
+            items.append(f"{label} {v * 100:g}%")
+        else:
+            items.append(f"{label} {v}")
+    return (
+        f"🟡 识别到 {len(pending)} 项参数：{'、'.join(items)}。"
+        "已填入右侧表单，请核对后点「确认开算」——**确认前不进引擎**。"
+        "（在表单底栏勾选「NL 免确认直接生效」可跳过本层）"
+    )
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest):
     """
@@ -1865,6 +1889,30 @@ async def chat(req: ChatRequest):
             params
             and intent not in _STATELESS_INTENTS
         )
+        # ── M-07 NL 确认层（前端按设置发送 nl_confirm）────────────────────
+        # 抽取结果先回表单待确认，不确认不进引擎。事故背景（2026-10-03）：
+        # 系统 ack「你给了客单价18」而引擎里没有——抽取结果无声进引擎必须封死。
+        # 字段 None=未声明：旧调用方/测试走原合并路径（API 面零回归）。
+        if should_merge and req.nl_confirm:
+            _snap = get_biz_snapshot(tid)      # reset 之后的现值；拦截点在 apply 之前
+            _cur = _snap.get("params") or {}
+            pending_params = {
+                k: v for k, v in params.items()
+                if v not in (None, "", [], {}) and _cur.get(k) != v
+            }
+            if pending_params:
+                _merged = dict(_cur)
+                if _snap.get("industry"):
+                    _merged.setdefault("industry", _snap["industry"])
+                return JSONResponse({
+                    "content": _confirm_pending_content(pending_params),
+                    "thread_id": tid,
+                    "intent": intent,
+                    "confirm_required": True,
+                    "pending_params": pending_params,
+                    "params": _merged,
+                })
+            # 与现值全部一致：无需确认（也防「确认后再发同句」死循环），落原路径
         guard_info: dict = {}
         if should_merge:
             # 带守门合并：自动检测「6000% vs 历史 60%」类矛盾，挂到 state 前置展示

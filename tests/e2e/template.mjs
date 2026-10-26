@@ -133,10 +133,17 @@ try {
 
   // ── 步骤4 改参只见 PUT：旧改参 UI 改一个值 → pcRecalc → 网络面板零 /chat ──
   try {
-    // 先造一个 chat 落的参数（price_per_unit），让旧改参区有字段可改
+    // 先造一个 chat 落的参数（price_per_unit），让旧改参区有字段可改。
+    // M-07 后产品默认走确认层：NL → 确认条 → 确认开算（PUT）→ 进引擎。
     await page.fill("#input", "客单价15元");
     await page.click("#send");
-    await page.waitForTimeout(2500);
+    await page.waitForSelector("#params-list .pf-confirm", { timeout: 8000 });
+    const confirmPut = page.waitForResponse(
+      (r) => r.request().method() === "PUT" && /\/tasks\/[^/]+\/params$/.test(r.url()), { timeout: 8000 });
+    await page.click("#params-list .pf-confirm-ok");
+    const confirmResp = await confirmPut;
+    if (confirmResp.status() !== 200) fail("只见PUT", `确认开算 PUT 状态 ${confirmResp.status()} != 200`);
+    await page.waitForTimeout(400);
     await page.click("#cat-bar .cat-btn[data-cat='params']");
     await page.waitForSelector("#pc-fields input[data-field]", { timeout: 5000 });
     await page.fill("#pc-fields input[data-field='price_per_unit']", "18");

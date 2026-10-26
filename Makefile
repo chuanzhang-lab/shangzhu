@@ -41,11 +41,13 @@ lint:
 # 零未捕获异常/零 /client-log 上报。静态扫描测不出的运行期 TypeError 在这里拦。
 # advice.mjs：AI 解读按钮生命周期 + 前端 abort 预算（fix-ai-advice-timeout-240s）。
 # template.mjs（M-06）：行业模板预填 + 改参只见 PUT（pcRecalc 结构化）。
+# confirm.mjs（M-07）：NL 确认层（不确认不进引擎 + 跳过开关）。
 e2e:
 	node tests/e2e/smoke.mjs
 	node tests/e2e/advice.mjs
 	node tests/e2e/form.mjs
 	node tests/e2e/template.mjs
+	node tests/e2e/confirm.mjs
 
 compile:
 	$(PY) -m compileall -q src web_server.py tests
