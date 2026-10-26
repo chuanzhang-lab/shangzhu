@@ -48,8 +48,7 @@ let userManualSwitch = false;     // 用户是否手动切过分类（防止自�
 let drafts = {};                  // 分草稿 { all: '', analyze: '', params: '', decide: '', compare: '' }
 CATS.forEach(c => drafts[c] = '');
 let messageTags = [];             // [{ el, cat }] 每条消息的分类标签
-let pendingParamChange = null;    // F3：本次改参意图 {field, value}，用于响应采纳校验
-let recentlyUpdatedField = null;  // F3：最近一次被成功采纳的字段，用于面板高亮
+let recentlyUpdatedField = null;  // F3：最近一次被成功采纳的字段，用于面板高亮（M-06 起 setter 在 submitParams）
 
 // ── 任务状态 ──
 let currentTaskId = null, busy = false;
@@ -509,51 +508,42 @@ function updateAnalyzeStatus() {
 
 function renderParamFields() {
   if (!lastParams) { pcFields.innerHTML = '<span class="empty-hint">先有一版参数</span>'; return; }
+  const specByName = {};
+  if (formSchema) formSchema.input_fields.forEach(f => { specByName[f.name] = f; });
   const fields = ['total_investment', 'monthly_rent', 'daily_traffic', 'price_per_unit', 'employee_count', 'avg_salary', 'variable_cost_ratio'];
   let html = '';
   fields.forEach(f => {
     if (lastParams[f] !== undefined && lastParams[f] !== null) {
-      let v = lastParams[f];
-      if (f === 'variable_cost_ratio' && typeof v === 'number' && Number.isFinite(v)) v = (v * 100).toFixed(0) + '%';
-      if (v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))) v = '—';
-      html += '<span class="pc-field"><label>' + fieldLabel(f) + '</label><input data-field="' + f + '" value="' + v + '"></span>';
+      // 显示口径统一到 formInputValue（0~1 → 百分数），与提交比对同源——F4 的 % quirk 随 NL 合成删除
+      const v = formInputValue(specByName[f], lastParams[f]);
+      html += '<span class="pc-field"><label>' + fieldLabel(f) + '</label><input data-field="' + f + '" value="' + esc(v) + '"></span>';
     }
   });
   if (!html) html = '<span class="empty-hint">暂无可改参数</span>';
   pcFields.innerHTML = html;
 }
 
-pcRecalc.addEventListener('click', () => {
+// M-06：改参切结构化——不再合成 NL 句子走 /chat（P-04 假表单 round-trip），
+// 改动检测口径同 saveParamsForm（formInputValue），提交走 submitParams（PUT 唯一真源）
+pcRecalc.addEventListener('click', async () => {
+  if (!currentTaskId) { setToast('先建任务再改参'); return; }
+  const schema = await ensureFormSchema().catch(() => null);
+  const specByName = {};
+  ((schema && schema.input_fields) || []).forEach(f => { specByName[f.name] = f; });
   const inputs = pcFields.querySelectorAll('input[data-field]');
-  const parts = [];
-  let lastChanged = null;
+  const payload = {}; let changed = 0;
   inputs.forEach(inp => {
-    const f = inp.dataset.field; const v = inp.value.trim(); if (!v) return;
-    // F4：只发改动过的字段（与渲染初值不一致才提交），避免把未改字段无脑重发
+    const f = inp.dataset.field; const spec = specByName[f] || {};
+    const raw = inp.value.trim(); if (!raw) return;
     const orig = lastParams ? lastParams[f] : null;
-    let origShown = null;
-    if (orig !== null && orig !== undefined) {
-      // 与渲染初值（renderParamFields）格式保持一致：vc 带 %，其余用 String()
-      // （原实现 vc 用 "40" 比对 "40%" 恒不相等 → 未改动的 vc 也被当作改动提交）
-      origShown = (f === 'variable_cost_ratio') ? String(Math.round(orig * 100)) + '%' : String(orig);
-    }
-    const changed = origShown === null || v !== origShown;
-    if (changed) { parts.push(fieldLabel(f) + '改为' + v); lastChanged = { field: f, value: v }; }
+    if (raw === formInputValue(spec, orig)) return;         // 未改动不发
+    const n = Number(raw.replace(/[,，%％\s]/g, ''));
+    if (!Number.isFinite(n)) { setToast('⚠️ ' + fieldLabel(f) + ' 不是有效数字，未保存', '#d97706'); return; }
+    payload[f] = (spec.unit === '0~1' && n > 1) ? Math.round(n / 100 * 1e6) / 1e6 : n;
+    changed++;
   });
-  if (parts.length === 0) { setToast('未检测到参数改动'); return; }
-  pendingParamChange = lastChanged;   // F3：记录本次改参意图，响应后校验采纳
-  input.value = parts.join('，'); drafts[currentCat] = input.value; send();
-});
-
-// F4：改参输入框支持回车单字段提交（含 IME 组合防护，拼音选词回车不误提交）
-pcFields.addEventListener('keydown', (e) => {
-  if (e.isComposing || e.keyCode === 229) return;
-  if (e.key === 'Enter') { const inputEl = e.target;
-    if (inputEl && inputEl.dataset && inputEl.dataset.field) { e.preventDefault();
-      const f = inputEl.dataset.field; const v = inputEl.value.trim(); if (!v) return;
-      pendingParamChange = { field: f, value: v };
-      input.value = fieldLabel(f) + '改为' + v; drafts[currentCat] = input.value; send();
-    } }
+  if (changed === 0) { setToast('未检测到参数改动'); return; }
+  await submitParams(payload, changed);
 });
 
 ccRun.addEventListener('click', () => {
@@ -958,6 +948,8 @@ function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<'
 
 let formSchema = null;                 // /form-schema 缓存（页面级一次）
 let formSchemaPromise = null;
+let currentIndustry = '';              // M-06：当前选择的行业模板（预填 / benchmark / 按节重置）
+let draftDefaultFields = {};           // M-06：预填草稿字段集 → [默认] 标（保存后转 [用户]）
 
 function ensureFormSchema() {
   if (formSchema) return Promise.resolve(formSchema);
@@ -984,11 +976,28 @@ function renderParamsForm(schema, params, paramSources, derived) {
   if (!currentTaskId) { clearParamsPanel(); return; }
   const specByName = {};
   schema.input_fields.forEach(f => { specByName[f.name] = f; });
+  // M-06 行业模板：选择器 + benchmark 参考列（行业值优先用已落库的，回退当前选择）
+  const tplKeys = Object.keys(schema.templates || {});
+  const indShown = (params && params.industry) || currentIndustry || '';
+  const tpl = (tplKeys.indexOf(indShown) >= 0 && schema.templates[indShown]) || null;
   let html = '';
+  if (tplKeys.length) {
+    html += '<div class="pf-industry"><label for="pf-industry">行业</label><select id="pf-industry">'
+      + '<option value="">选择行业</option>'
+      + tplKeys.map(k => '<option value="' + esc(k) + '"' + (k === indShown ? ' selected' : '') + '>' + esc(k) + '</option>').join('')
+      + '</select></div>';
+    if (tpl) {
+      const bench = tpl.benchmark || {};
+      const benchRows = Object.keys(bench).map(k => '<div class="pf-bench-row"><span class="pf-bench-k">' + esc(k) + '</span><span class="pf-bench-v">' + esc(String(bench[k])) + '</span></div>').join('');
+      if (benchRows) html += '<div class="pf-bench"><div class="pf-bench-title">' + esc(indShown) + ' 参考基准</div>' + benchRows + '</div>';
+    }
+  }
   schema.groups.forEach((g, gi) => {
     const hasValue = g.fields.some(f => params[f] !== undefined && params[f] !== null && params[f] !== '');
     const open = hasValue || gi === 0;                    // 有值的节展开；基本情况常开
-    html += '<details class="pf-section"' + (open ? ' open' : '') + '><summary>' + esc(g.label) + '</summary>';
+    const gTplFields = tpl ? g.fields.filter(f => (tpl.hypotheses || {})[f] !== undefined) : [];
+    html += '<details class="pf-section"' + (open ? ' open' : '') + '><summary>' + esc(g.label)
+      + (gTplFields.length ? ' <button type="button" class="pf-reset" data-group="' + gi + '">重置为模板默认</button>' : '') + '</summary>';
     g.fields.forEach(f => {
       const spec = specByName[f] || { name: f, label: f, unit: '', type: 'float' };
       const v = params[f];
@@ -999,6 +1008,8 @@ function renderParamsForm(schema, params, paramSources, derived) {
         const srcClass = src.startsWith('[用户]') ? 'psrc-user' : src.startsWith('[缺失]') ? 'psrc-missing' : 'psrc-derived';
         const srcLabel = src.startsWith('[用户]') ? '用户' : src.startsWith('[缺失]') ? '缺失' : '推算';
         srcHtml = '<span class="psrc ' + srcClass + '">' + srcLabel + '</span>';
+      } else if (draftDefaultFields[f]) {
+        srcHtml = '<span class="psrc psrc-default">默认</span>';   // M-06：预填草稿标，保存后转 [用户]
       }
       const unitHtml = spec.unit === '0~1' ? '<span class="punit">%</span>'
         : (spec.unit ? '<span class="punit">' + esc(spec.unit) + '</span>' : '');
@@ -1036,8 +1047,44 @@ function updateParamsPanel(params, paramSources, derived) {
     });
 }
 
-// 表单保存：只提交改动过的非空字段（F4 精神），数字校验 + 0~1 比率归一，
-// 走 PUT（apply_turn_guarded 守门在服务端兜底）。
+// PUT 唯一真源（M-06 抽取）：表单保存与旧改参区（pcRecalc）共写——参数落库只有这一条路
+async function submitParams(payload, changed) {
+  if (!currentTaskId) return;
+  try {
+    const r = await fetch('/tasks/' + currentTaskId + '/params', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ params: payload }),
+    });
+    const data = await r.json().catch(() => null);
+    if (!r.ok || !data || !data.ok) throw new Error('HTTP ' + r.status);
+    // 本地真相源同步：params 快照 + 任务缓存 + [用户] 来源标
+    lastParams = Object.assign({}, lastParams || {}, data.params);
+    if (!lastParamSources) lastParamSources = {};
+    Object.keys(payload).forEach(f => { lastParamSources[f] = '[用户] 表单'; delete draftDefaultFields[f]; });
+    if (tasksCache[currentTaskId]) tasksCache[currentTaskId].params = Object.assign({}, tasksCache[currentTaskId].params, data.params);
+    hasParams = Object.keys(lastParams).length > 0;
+    updateCatDisabled(); updateBadges(); updateControls();
+    recentlyUpdatedField = (changed === 1) ? Object.keys(payload)[Object.keys(payload).length - 1] : null;   // F3 高亮迁移：结构化保存触发
+    const g = data.guard || {};
+    if (data.persist_warning) {
+      setToast('⚠️ ' + data.persist_warning, '#d97706');   // Z3：落盘失败必须可见
+    } else if (g.needs_confirmation && g.needs_confirmation.length) {
+      setToast('已保存，引擎提示请确认：' + g.needs_confirmation.join('；'), '#d97706');
+    } else if (g.has_critical) {
+      setToast('已保存，但有参数被引擎修正（原值超常见区间）', '#d97706');
+    } else {
+      setToast('已保存 ' + changed + ' 项');
+    }
+    updateParamsPanel(data.params, lastParamSources, null);
+  } catch (e) {
+    reportClientError('submitParams', 'PUT_FAILED', e);
+    setToast('⚠️ 保存失败，请稍后重试', '#d97706');
+  }
+}
+
+// 表单保存：只提交改动过的非空字段，数字校验 + 0~1 比率归一，
+// 提交走 submitParams（PUT 唯一真源；apply_turn_guarded 守门在服务端兜底）。
 async function saveParamsForm() {
   if (!currentTaskId || !formSchema) return;
   const specByName = {};
@@ -1062,47 +1109,79 @@ async function saveParamsForm() {
   });
   if (bad.length) { setToast('⚠️ ' + bad.join('、') + ' 不是有效数字，未保存', '#d97706'); return; }
   if (changed === 0) { setToast('未检测到改动'); return; }
-  try {
-    const r = await fetch('/tasks/' + currentTaskId + '/params', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify({ params: payload }),
-    });
-    const data = await r.json().catch(() => null);
-    if (!r.ok || !data || !data.ok) throw new Error('HTTP ' + r.status);
-    // 本地真相源同步：params 快照 + 任务缓存 + [用户] 来源标
-    lastParams = Object.assign({}, lastParams || {}, data.params);
-    if (!lastParamSources) lastParamSources = {};
-    Object.keys(payload).forEach(f => { lastParamSources[f] = '[用户] 表单'; });
-    if (tasksCache[currentTaskId]) tasksCache[currentTaskId].params = Object.assign({}, tasksCache[currentTaskId].params, data.params);
-    hasParams = Object.keys(lastParams).length > 0;
-    updateCatDisabled(); updateBadges(); updateControls();
-    const g = data.guard || {};
-    if (data.persist_warning) {
-      setToast('⚠️ ' + data.persist_warning, '#d97706');   // Z3：落盘失败必须可见
-    } else if (g.needs_confirmation && g.needs_confirmation.length) {
-      setToast('已保存，引擎提示请确认：' + g.needs_confirmation.join('；'), '#d97706');
-    } else if (g.has_critical) {
-      setToast('已保存，但有参数被引擎修正（原值超常见区间）', '#d97706');
-    } else {
-      setToast('已保存 ' + changed + ' 项');
-    }
-    updateParamsPanel(data.params, lastParamSources, null);
-  } catch (e) {
-    reportClientError('saveParamsForm', 'PUT_FAILED', e);
-    setToast('⚠️ 保存失败，请稍后重试', '#d97706');
-  }
+  await submitParams(payload, changed);
 }
 
-// 保存按钮 + 输入回车（IME 组合防护同 F4）：paramsList 内容每次重建，用事件委托
+// 保存按钮 + 按节重置 + 输入回车（IME 组合防护同 F4）：paramsList 内容每次重建，用事件委托
 paramsList.addEventListener('click', e => {
   if (e.target && e.target.classList && e.target.classList.contains('pf-save')) saveParamsForm();
+  if (e.target && e.target.classList && e.target.classList.contains('pf-reset')) {
+    e.preventDefault();                                    // 阻止 <summary> 折叠联动
+    resetSectionToTemplate(Number(e.target.dataset.group));
+  }
 });
 paramsList.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter' && e.target && e.target.dataset && e.target.dataset.field) {
     e.preventDefault();
     saveParamsForm();
+  }
+});
+
+// ── M-06 行业模板预填（P-06）：选行业 → 空字段填模板值，草稿标 [默认]，保存时经 PUT 落库 ──
+function markDraftDefault(inp) {
+  const row = inp.closest('.pf-row');
+  if (!row || row.querySelector('.psrc-default')) return;
+  const holder = inp.parentElement;
+  if (holder) holder.insertAdjacentHTML('afterbegin', '<span class="psrc psrc-default">默认</span>');
+}
+
+function fillTemplateValue(inp, spec, val) {
+  inp.value = formInputValue(spec, val);
+  markDraftDefault(inp);
+}
+
+function prefillFromTemplate(schema, overwrite) {
+  const tpl = schema.templates && schema.templates[currentIndustry];
+  if (!tpl || !tpl.hypotheses) return;
+  const specByName = {}; schema.input_fields.forEach(f => { specByName[f.name] = f; });
+  Object.keys(tpl.hypotheses).forEach(k => {
+    const inp = paramsList.querySelector('input[data-field="' + k + '"]');
+    if (!inp) return;
+    if (!overwrite && inp.value.trim() !== '') return;     // 选行业只填空字段，不覆盖已有值
+    fillTemplateValue(inp, specByName[k] || {}, tpl.hypotheses[k]);
+    draftDefaultFields[k] = true;
+  });
+}
+
+function resetSectionToTemplate(gi) {
+  const schema = formSchema;
+  const tpl = schema && schema.templates && schema.templates[currentIndustry];
+  const g = (schema && schema.groups || [])[gi];
+  if (!g || !tpl || !tpl.hypotheses) return;
+  const specByName = {}; schema.input_fields.forEach(f => { specByName[f.name] = f; });
+  g.fields.forEach(f => {
+    if (tpl.hypotheses[f] === undefined) return;
+    const inp = paramsList.querySelector('input[data-field="' + f + '"]');
+    if (!inp) return;
+    fillTemplateValue(inp, specByName[f] || {}, tpl.hypotheses[f]);   // 按节重置 = 显式覆盖
+    draftDefaultFields[f] = true;
+  });
+  setToast('已按「' + currentIndustry + '」模板重置本节（保存后生效）');
+}
+
+paramsList.addEventListener('change', e => {
+  if (e.target && e.target.id === 'pf-industry') {
+    currentIndustry = e.target.value || '';
+    draftDefaultFields = {};                               // 换行业 = 换草稿基线，旧 [默认] 标清空
+    ensureFormSchema().then(schema => {
+      renderParamsForm(schema, lastParams || {}, lastParamSources, null);
+      if (!currentIndustry) return;
+      // 行业字段随选择进表单（保存时与模板值一起 PUT），再预填空字段
+      const indInp = paramsList.querySelector('input[data-field="industry"]');
+      if (indInp && !indInp.value.trim()) { indInp.value = currentIndustry; markDraftDefault(indInp); draftDefaultFields.industry = true; }
+      prefillFromTemplate(schema, false);
+    }).catch(() => {});
   }
 });
 
@@ -1133,31 +1212,6 @@ function exportGuard() {
 }
 exportPdf.addEventListener('click', () => { if (exportGuard()) return; input.value = '生成PDF报告'; drafts[currentCat] = input.value; send(); });
 exportExcel.addEventListener('click', () => { if (exportGuard()) return; input.value = '生成Excel模型'; drafts[currentCat] = input.value; send(); });
-
-// Module 5: 辅助函数 — validateParamAdoption（F3 改参校验）
-function validateParamAdoption(params, pending) {
-  if (!pending) return null;
-  const pc = pending;
-  const target = (params || {})[pc.field];
-  let accepted = false;
-  if (target !== undefined && target !== null) {
-    if (pc.field === 'variable_cost_ratio' && typeof target === 'number') {
-      const wantRate = parseFloat(String(pc.value).replace('%', ''));
-      accepted = Math.abs(target * 100 - wantRate) < 1e-6;
-    } else {
-      accepted = String(target) === String(pc.value).replace('%', '') || String(target) === String(pc.value);
-    }
-  }
-  const label = fieldLabel(pc.field);
-  if (accepted) {
-    recentlyUpdatedField = pc.field;
-    setToast('✅ ' + label + ' 已更新为 ' + pc.value, '#059669');
-  } else {
-    recentlyUpdatedField = null;
-    setToast('⚠️ ' + label + ' 未采纳（当前 ' + formatVal(pc.field, target) + '），请用「' + label + ' ' + pc.value + '%」重试', '#d97706');
-  }
-  return accepted;
-}
 
 // Module 5: 辅助函数 — addActionButtons（应用 A/B 按钮）
 function addActionButtons(el, content) {
@@ -1276,13 +1330,6 @@ async function send() {
     setMsgBody(placeholder, renderMarkdown(data.content || '（无响应）'));
     placeholder.classList.remove('streaming');
 
-    // ── F3 改参采纳校验 ──
-    if (pendingParamChange) {
-      const pc = pendingParamChange;
-      pendingParamChange = null;
-      validateParamAdoption(data.params, pc);
-    }
-
     // ── 打标（使用 tagMessage 辅助函数）──
     const msgCat = classifyResponse(data, null);
     tagMessage(placeholder, msgCat);
@@ -1334,7 +1381,6 @@ async function send() {
 
     if (data.thread_id && data.thread_id !== currentTaskId) { currentTaskId = data.thread_id; loadTasks(); }
   } catch (e) {
-    pendingParamChange = null;  // 网络错误时清除，防止下次发送误校验
     if (sentTaskId !== currentTaskId) { placeholder.remove(); return; }  // 已切任务，丢弃
     placeholder.classList.remove('streaming');
     const isTimeout = (e && e.name === 'AbortError');

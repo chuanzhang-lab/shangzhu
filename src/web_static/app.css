@@ -132,7 +132,19 @@
   .psrc-user { background: #dbeafe; color: #1e40af; }
   .psrc-derived { background: #f0f0f1; color: #666; }
   .psrc-missing { background: #fee2e2; color: #b91c1c; }
+  .psrc-default { background: #fef3c7; color: #92400e; }   /* M-06 预填草稿标 */
   .param-section { font-size: 11px; font-weight: 600; color: #999; padding: 8px 0 4px 0; text-transform: uppercase; }
+  /* M-06 行业模板 */
+  .pf-industry { display: flex; align-items: center; gap: 8px; padding: 4px 0 2px 0; }
+  .pf-industry label { font-size: 11px; color: #999; }
+  .pf-industry select { font-size: 12px; padding: 3px 7px; border: 1px solid #e5e5e5; border-radius: 5px; background: #fff; color: #1a1a1a; }
+  .pf-bench { margin: 2px 0 6px 0; padding: 6px 8px; background: #faf7f2; border-radius: 6px; }
+  .pf-bench-title { font-size: 10px; font-weight: 600; color: #999; margin-bottom: 4px; }
+  .pf-bench-row { display: flex; justify-content: space-between; font-size: 11px; padding: 1px 0; }
+  .pf-bench-k { color: #999; }
+  .pf-bench-v { color: #1a1a1a; }
+  .pf-reset { font-size: 10px; padding: 1px 8px; background: none; border: 1px solid #ddd; border-radius: 4px; color: #999; cursor: pointer; margin-left: 6px; }
+  .pf-reset:hover { border-color: #B87333; color: #B87333; }
   /* M-05 表单（schema 驱动） */
   .pf-section summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #999; padding: 10px 0 4px 0; text-transform: uppercase; list-style: none; user-select: none; }
   .pf-section summary::before { content: '▸ '; }
