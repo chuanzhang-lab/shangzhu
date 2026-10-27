@@ -45,6 +45,21 @@
 > 四义封闭：任何参数的来源只能是这四种之一，不得新增第五种标记（曾出现的 `[阶梯]`
 > 因破坏封闭性已被回滚，见 `CALCULATION_PHILOSOPHY.md`）。
 
+## 参数输入层（0.4.0 起）
+
+三层输入、**一个写入口**、单向数据流：
+
+```
+① 结构化表单（主）┐
+② NL 快捷输入    ┼→ PUT /tasks/{id}/params（唯一写入口）→ apply_turn_guarded → SessionState → 落库
+③ NL 确认层      ┘   （merge/guard/锁/快照同步全部复用，禁止新写更新路径）
+```
+
+- **表单主输入**：`GET /form-schema` 驱动全字段分节（INPUT_SPECS 25 字段 + PARAM_GROUPS + 12 行业模板），前端 schema 驱动渲染，加字段只改 field_model 一处；
+- **NL 确认层（默认开）**：/chat 抽取的参数以 `[待确认]` 草稿态进表单，用户点「确认开算」→ PUT 才进引擎；不确认不进引擎。`nl_confirm` 请求字段控制（缺省 None = 旧调用方走原合并路径，API 兼容；前端按「NL 免确认直接生效」设置显式发送）；
+- **`[待确认]` 不破坏四义封闭**：它是前端草稿态，从不写入引擎 param_sources——引擎侧来源永远只有上述四种；
+- **守门铁律**：任何新的参数写入需求必须走 `apply_turn_guarded`（`PUT` 端点与前端 `submitParams` 是它的仅有的两个调用面），历史上「另写一条简单更新路径」是本项目 bug 之源。
+
 ## 工具规范
 
 ### quick_scan

@@ -56,6 +56,12 @@ const server = spawn(
 let browser;
 try {
   await waitHealthy();
+  // 端口冲突守卫（M-07 事故：孤儿 uvicorn 占端口 → waitHealthy 静默打到旧代码服务器 = 假红）
+  await new Promise((r) => setTimeout(r, 600));
+  if (server.exitCode !== null) {
+    fail("启动", `端口 ${PORT} 被旧进程占用，本测试自己的服务没起来（先 kill 旧 uvicorn）`);
+    throw new Error(`port ${PORT} occupied by stale server`);
+  }
   log("server healthy, launching chromium ...");
 
   const schema = await (await fetch(`${BASE}/form-schema`)).json();
@@ -131,40 +137,33 @@ try {
     else log(`步骤3 重置 ✓: ${k0} 恢复 ${want}`);
   } catch (e) { fail("重置", String(e && e.message ? e.message : e)); }
 
-  // ── 步骤4 改参只见 PUT：旧改参 UI 改一个值 → pcRecalc → 网络面板零 /chat ──
+  // ── 步骤4 改参只见 PUT（M-08：旧改参区已删，改参唯一路径 = 右侧表单）──
   try {
-    // 先造一个 chat 落的参数（price_per_unit），让旧改参区有字段可改。
-    // M-07 后产品默认走确认层：NL → 确认条 → 确认开算（PUT）→ 进引擎。
+    // 确认层造参：NL → 确认条 → 确认开算（PUT price_per_unit=15 进引擎）
     await page.fill("#input", "客单价15元");
     await page.click("#send");
     await page.waitForSelector("#params-list .pf-confirm", { timeout: 8000 });
-    const confirmPut = page.waitForResponse(
-      (r) => r.request().method() === "PUT" && /\/tasks\/[^/]+\/params$/.test(r.url()), { timeout: 8000 });
     await page.click("#params-list .pf-confirm-ok");
-    const confirmResp = await confirmPut;
-    if (confirmResp.status() !== 200) fail("只见PUT", `确认开算 PUT 状态 ${confirmResp.status()} != 200`);
-    await page.waitForTimeout(400);
-    await page.click("#cat-bar .cat-btn[data-cat='params']");
-    await page.waitForSelector("#pc-fields input[data-field]", { timeout: 5000 });
-    await page.fill("#pc-fields input[data-field='price_per_unit']", "18");
-
+    await page.waitForTimeout(600);
+    // 旧改参区必须不存在（M-08 计划性删除，留 DOM 不留 JS = 死按钮）
+    if (await page.$("#params-controls")) fail("只见PUT", "旧改参区 #params-controls 仍在（M-08 应删）");
+    // 表单改值 → 保存 → 网络窗口只见 PUT、零 /chat
+    await page.fill("#params-list input[data-field='price_per_unit']", "18");
     const window = [];
     const onReq = (r) => window.push(`${r.method()} ${r.url()}`);
     page.on("request", onReq);
     const putPromise = page.waitForResponse(
       (r) => r.request().method() === "PUT" && /\/tasks\/[^/]+\/params$/.test(r.url()), { timeout: 8000 });
-    await page.click("#params-controls .pc-recalc");
-    await putPromise;
+    await page.click("#params-list .pf-save");
+    const putResp = await putPromise;
+    if (putResp.status() !== 200) fail("只见PUT", `PUT 状态 ${putResp.status()} != 200`);
     await page.waitForTimeout(300);
     page.off("request", onReq);
-
-    const puts = window.filter((s) => s.startsWith("PUT ") && /\/tasks\/[^/]+\/params$/.test(s));
     const chats = window.filter((s) => s.includes("/chat"));
-    if (!puts.length) fail("只见PUT", "pcRecalc 未发出任何 PUT——改参未切结构化");
-    if (chats.length) fail("只见PUT", `改参窗口出现 ${chats.length} 个 /chat 请求——NL round-trip 未删`);
+    if (chats.length) fail("只见PUT", `改参窗口出现 ${chats.length} 个 /chat 请求`);
     const tasks = await (await fetch(`${BASE}/tasks`)).json();
-    if (tasks[0]?.params?.price_per_unit !== 18) fail("只见PUT", `PUT 后 price_per_unit=${tasks[0]?.params?.price_per_unit} != 18`);
-    if (!process.exitCode) log("步骤4 改参只见 PUT ✓: 零 /chat，price_per_unit=18 落库");
+    if (tasks[0]?.params?.price_per_unit !== 18) fail("只见PUT", `保存后 price_per_unit=${tasks[0]?.params?.price_per_unit} != 18`);
+    if (!process.exitCode) log("步骤4 改参只见 PUT ✓: 旧改参区已删，表单路径零 /chat，price=18 落库");
   } catch (e) { fail("只见PUT", String(e && e.message ? e.message : e)); }
 
   // ── 卫生断言 ──

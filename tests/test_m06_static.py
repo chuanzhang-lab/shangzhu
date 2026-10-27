@@ -34,11 +34,9 @@ def test_无f4补丁origshown() -> None:
     assert "origShown" not in _app_js(), "F4 补丁 origShown 仍在——应随 NL 合成删除"
 
 
-def test_pcrecalc改调put() -> None:
-    """pcRecalc 处理器：调共享 submitParams（PUT 唯一真源），零 send()。"""
-    h = _pc_recalc_handler(_app_js())
-    assert "submitParams" in h, "pcRecalc 未调 submitParams——改参仍走 NL 路径"
-    assert "send(" not in h, "pcRecalc 仍在 send()——网络面板会见到 /chat"
+# 注：原 test_pcrecalc改调put（pcRecalc 处理器改调 submitParams）随 M-08
+# 计划性删除旧改参区而退役（计划 6.10「保留一版，M-06 后删」）；
+# 「PUT 唯一真源」不变量由 test_m08_static.test_put唯一写入口 承接。
 
 
 def test_f3_nl采纳链已删() -> None:

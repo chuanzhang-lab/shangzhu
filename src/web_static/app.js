@@ -13,9 +13,6 @@ const analyzeStatus = document.getElementById('analyze-status');
 const analyzeControls = document.getElementById('analyze-controls');
 const decidePrompt = document.getElementById('decide-prompt');
 const decideControls = document.getElementById('decide-controls');
-const paramsControls = document.getElementById('params-controls');
-const pcFields = document.getElementById('pc-fields');
-const pcRecalc = paramsControls.querySelector('.pc-recalc');
 const compareControls = document.getElementById('compare-controls');
 const ccField = document.getElementById('cc-field');
 const ccValue = document.getElementById('cc-value');
@@ -446,16 +443,11 @@ function updateControls() {
   analyzeControls.style.display = 'none';
   decidePrompt.style.display = 'none';
   decideControls.style.display = 'none';
-  paramsControls.style.display = 'none';
   compareControls.style.display = 'none';
   if (currentCat === 'analyze' && hasParams) {
     analyzeStatus.style.display = 'block';
     updateAnalyzeStatus();
     analyzeControls.style.display = 'flex';
-  }
-  if (currentCat === 'params' && hasParams) {
-    paramsControls.style.display = 'block';
-    renderParamFields();
   }
   if (currentCat === 'decide') {
     decidePrompt.style.display = 'block';
@@ -505,46 +497,6 @@ function updateAnalyzeStatus() {
   keys.forEach(k => { if (lastParams[k] != null) parts.push(fieldLabel(k) + ' ' + formatVal(k, lastParams[k])); });
   analyzeStatus.textContent = parts.length ? '当前参数：' + parts.join(' · ') : '参数已加载';
 }
-
-function renderParamFields() {
-  if (!lastParams) { pcFields.innerHTML = '<span class="empty-hint">先有一版参数</span>'; return; }
-  const specByName = {};
-  if (formSchema) formSchema.input_fields.forEach(f => { specByName[f.name] = f; });
-  const fields = ['total_investment', 'monthly_rent', 'daily_traffic', 'price_per_unit', 'employee_count', 'avg_salary', 'variable_cost_ratio'];
-  let html = '';
-  fields.forEach(f => {
-    if (lastParams[f] !== undefined && lastParams[f] !== null) {
-      // 显示口径统一到 formInputValue（0~1 → 百分数），与提交比对同源——F4 的 % quirk 随 NL 合成删除
-      const v = formInputValue(specByName[f], lastParams[f]);
-      html += '<span class="pc-field"><label>' + fieldLabel(f) + '</label><input data-field="' + f + '" value="' + esc(v) + '"></span>';
-    }
-  });
-  if (!html) html = '<span class="empty-hint">暂无可改参数</span>';
-  pcFields.innerHTML = html;
-}
-
-// M-06：改参切结构化——不再合成 NL 句子走 /chat（P-04 假表单 round-trip），
-// 改动检测口径同 saveParamsForm（formInputValue），提交走 submitParams（PUT 唯一真源）
-pcRecalc.addEventListener('click', async () => {
-  if (!currentTaskId) { setToast('先建任务再改参'); return; }
-  const schema = await ensureFormSchema().catch(() => null);
-  const specByName = {};
-  ((schema && schema.input_fields) || []).forEach(f => { specByName[f.name] = f; });
-  const inputs = pcFields.querySelectorAll('input[data-field]');
-  const payload = {}; let changed = 0;
-  inputs.forEach(inp => {
-    const f = inp.dataset.field; const spec = specByName[f] || {};
-    const raw = inp.value.trim(); if (!raw) return;
-    const orig = lastParams ? lastParams[f] : null;
-    if (raw === formInputValue(spec, orig)) return;         // 未改动不发
-    const n = Number(raw.replace(/[,，%％\s]/g, ''));
-    if (!Number.isFinite(n)) { setToast('⚠️ ' + fieldLabel(f) + ' 不是有效数字，未保存', '#d97706'); return; }
-    payload[f] = (spec.unit === '0~1' && n > 1) ? Math.round(n / 100 * 1e6) / 1e6 : n;
-    changed++;
-  });
-  if (changed === 0) { setToast('未检测到参数改动'); return; }
-  await submitParams(payload, changed);
-});
 
 ccRun.addEventListener('click', () => {
   const f = ccField.value; const v = ccValue.value.trim();
@@ -1060,7 +1012,7 @@ function updateParamsPanel(params, paramSources, derived) {
     });
 }
 
-// PUT 唯一真源（M-06 抽取）：表单保存与旧改参区（pcRecalc）共写——参数落库只有这一条路
+// PUT 唯一真源（M-06 抽取，M-08 起唯一调用面是表单）：表单保存与确认开算共写——参数落库只有这一条路
 async function submitParams(payload, changed) {
   if (!currentTaskId) return;
   try {

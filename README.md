@@ -27,6 +27,23 @@ A local-first financial modeling workbench for micro-entrepreneurs opening a noo
 
 ## 更新说明 / What's New
 
+### `0.4.0` — 参数输入层重构 / Param Input Layer Rebuild
+
+#### 中文
+
+把参数从「只能靠自然语言理解进引擎」重构为「结构化表单为主、NL 为快捷、NL 结果必须经确认」——理解层的误抽不再无声进引擎：
+
+- **一个写入口**：新增 `PUT /tasks/{id}/params`（复用 `apply_turn_guarded` 守门链：merge 语义 / 矛盾检测 / 归一化 / 锁 / 任务快照同步全部继承）。参数落库只有这一条路，前端所有改参路径（表单保存、模板预填、确认开算）共写同一真源。
+- **完整表单**：右侧面板由「只读」升级为 `GET /form-schema` 驱动的全字段分节表单（25 输入字段 + 派生只读区），三态来源标（[用户] / [默认] / [缺失]），缺参字段可直接补——不再回 NL 独木桥。
+- **行业模板预填**：选行业 → 12 行业默认参数预填（标 [默认]）+ benchmark 参考列 + 按节「重置为模板默认」。
+- **NL 确认层（默认开）**：对话中抽取的参数先以 [待确认] 填入表单，点「确认开算」才经 PUT 进引擎——不确认不进引擎（2026-10-03 事故教训：系统 ack「你给了客单价18」而引擎里没有）。表单底栏「NL 免确认直接生效」可跳过。
+- **修复两处实证 bug**：「客人80人→员工80人」误抽（`_HEADCOUNT_RE` 后置语境断言）；`memory` 存储 + 多 worker 部署跨轮丢参（演示实例改单 worker + 组合启动 WARNING）。
+- **删除旧改参快捷区**：其「合成 NL 句子 → 再解析」的假表单 round-trip 是误抽进引擎的通道本体。
+
+#### English
+
+Rebuilt the parameter input layer: structured form as the primary path, NL as a shortcut, and an NL confirmation layer (on by default) so extraction bugs can no longer enter the engine silently. One write path: `PUT /tasks/{id}/params` (reuses the `apply_turn_guarded` guard chain). Right panel is now a full `GET /form-schema`-driven form (25 fields, sections, source badges [user]/[default]/[missing], derived read-only area) with 12-industry template prefill + benchmark reference + per-section reset. Extracted NL params land in the form as [待确认] and only enter the engine on explicit confirm (「确认开算」); skippable via a footer checkbox. Also fixes the misread "客人80人 → employee_count=80" and the multi-worker memory-store param loss (single worker + startup warning).
+
 ### `0.3.0` — 存储加固：PG 连接层四道防线 / Storage Hardening
 
 #### 中文
@@ -185,18 +202,20 @@ Templates only provide **default assumptions**, always tagged as `[default]` —
 
 ## 界面与 API / UI & API
 
-前端是**分类对话工作台**：5 个分类标签（全部/分析/改参/决策/对比）作过滤器，右侧只读参数面板，左侧任务栏，空项目自动灰化。CSS/JS 在 `src/web_static/`。
+前端是**分类对话工作台**：5 个分类标签（全部/分析/改参/决策/对比）作过滤器，右侧为**结构化参数表单**（schema 驱动全字段分节、三态来源标、行业模板预填、NL 确认层），左侧任务栏，空项目自动灰化。CSS/JS 在 `src/web_static/`。
 
-The frontend is a **categorized conversation workbench**: 5 category tabs (All / Analysis / Edit Params / Decision / Comparison) as filters, a read-only parameter panel on the right, a task list on the left, empty projects auto-grayed. CSS/JS live in `src/web_static/`.
+The frontend is a **categorized conversation workbench**: 5 category tabs (All / Analysis / Edit Params / Decision / Comparison) as filters, a **structured parameter form** on the right (schema-driven, full fields, source badges, industry template prefill, NL confirmation layer), a task list on the left, empty projects auto-grayed. CSS/JS live in `src/web_static/`.
 
 主要 HTTP 接口 / Main HTTP Endpoints:
 
 | 接口 / Endpoint | 用途 / Purpose |
 |---|---|
 | `GET /health` | 健康检查（返回 `status` / `model` / `llm_configured` / `sessions` / `store_backend` 等） / Health check (returns `status` / `model` / `llm_configured` / `sessions` / `store_backend` etc.) |
-| `POST /chat` | 对话（`task_id` 指定任务，缺省自动新建） / Chat (`task_id` selects a task; creates a new one if omitted) |
+| `POST /chat` | 对话（`task_id` 指定任务，缺省自动新建；`nl_confirm` 控制确认层——缺省走旧合并路径） / Chat (`task_id` selects a task; `nl_confirm` toggles the confirmation layer — omit for the legacy merge path) |
 | `GET/POST /tasks` | 任务列表 / 新建 / Task list / Create |
 | `PUT /tasks/{id}/rename` | 任务改名 / Rename task |
+| `PUT /tasks/{id}/params` | **参数唯一写入口**（表单保存/模板预填/确认开算共写；复用 apply_turn_guarded 守门链） / **The single param write path** (form save / template prefill / confirm all funnel here; reuses the apply_turn_guarded guard chain) |
+| `GET /form-schema` | 表单 schema 投影（INPUT/DERIVED/PARAM_GROUPS + 12 行业模板；mtime 缓存） / Form schema projection (INPUT/DERIVED/PARAM_GROUPS + 12 industry templates; mtime-cached) |
 | `GET /tasks/{id}/messages` | 任务历史 / Task history |
 | `DELETE /tasks/{id}` | 归档任务（软删） / Archive task (soft delete) |
 

@@ -51,6 +51,12 @@ const server = spawn(
 let browser;
 try {
   await waitHealthy();
+  // 端口冲突守卫（M-07 事故：孤儿 uvicorn 占端口 → waitHealthy 静默打到旧代码服务器 = 假红）
+  await new Promise((r) => setTimeout(r, 600));
+  if (server.exitCode !== null) {
+    fail(`端口 ${PORT} 被旧进程占用，本测试自己的服务没起来（先 kill 旧 uvicorn）`);
+    throw new Error(`port ${PORT} occupied by stale server`);
+  }
   log("server healthy, launching chromium ...");
 
   // schema 是本测试的预期来源（不硬编码 25——加字段测试自动跟上）

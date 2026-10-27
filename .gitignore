@@ -1,3 +1,9 @@
+# ── 工具产物（M-08 收尾，P-07）───────────────────────────────
+.zcodeignore
+*.log.tmp
+playwright-report/
+test-results/
+
 # ── 前端构建产物（如后续引入 npm 工具链时生效）─────────────────
 node_modules
 dist

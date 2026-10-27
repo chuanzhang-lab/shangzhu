@@ -1048,10 +1048,6 @@ CHAT_HTML = """<!DOCTYPE html>
       <button class="panel-btn" data-q="先验证什么">🔍 先验证什么</button>
       <button class="panel-btn" data-q="还能撑多久">⏳ 还能撑多久</button>
     </div>
-    <div id="params-controls">
-      <div class="pc-row" id="pc-fields"></div>
-      <div class="pc-row"><button class="pc-recalc">重算</button></div>
-    </div>
     <div id="compare-controls">
       <div class="cc-row" id="cc-row-a"><span style="color:#666;">方案A = 当前参数（锁）</span></div>
       <div class="cc-row" id="cc-row-b"><span>方案B：改</span><select id="cc-field"><option value="monthly_rent">月租金</option><option value="daily_traffic">日均客流</option><option value="price_per_unit">客单价</option><option value="employee_count">员工人数</option><option value="total_investment">总投资</option><option value="avg_salary">人均薪资</option><option value="variable_cost_ratio">变动成本率</option></select><input id="cc-value" placeholder="数值"><button class="cc-run">跑对比</button></div>
