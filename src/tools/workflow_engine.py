@@ -481,6 +481,10 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         ("其他固定", p.get("other_fixed"), "[用户]" if p.get("other_fixed") is not None else None),
     ]
     present_specs = [(k, v, t) for k, v, t in component_specs if v is not None and t]
+    # 契约「按 0 计**并标注**」的另一半：人工未被计入固定成本时，必须在来源标注里
+    # 点名，否则用户读到的固定成本就是「租金」，却不知道人工被当成 0（INV-001）。
+    # 人工齐全（含用户显式给 0）时不加，避免把正常成分误报成缺失。
+    _labor_note = "（人工未提供，未计入）" if (not labor_present or labor_blocked) else ""
     if present_specs:
         comp_sum = sum(v for _, v, _ in present_specs)
         comp_src = " + ".join(f"{k}{t}" for k, _, t in present_specs)
@@ -494,15 +498,16 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         if explicit_total and explicit_total > 0:
             if abs(comp_sum - explicit_total) <= 1:
                 p["monthly_fixed_cost"] = comp_sum
-                src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src})"
+                src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src}){_labor_note}"
             else:
                 p["monthly_fixed_cost"] = comp_sum
                 src["monthly_fixed_cost"] = (
-                    f"{total_tag} 组件求和({comp_src})，与显式总数{explicit_total:g}矛盾→待澄清"
+                    f"{total_tag} 组件求和({comp_src}){_labor_note}，"
+                    f"与显式总数{explicit_total:g}矛盾→待澄清"
                 )
         else:
             p["monthly_fixed_cost"] = comp_sum
-            src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src})"
+            src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src}){_labor_note}"
     elif explicit_total and explicit_total > 0:
         p["monthly_fixed_cost"] = explicit_total
         src["monthly_fixed_cost"] = "[用户] 显式总数(组件未给出)"
@@ -1322,8 +1327,13 @@ def quick_scan(params_json: str) -> str:
         narrative = _build_narrative(params, param_sources, scenarios, pit_total)
 
         # ── 状态标记（D2：变动成本率缺失时 profit/gross_margin 为 None → 状态=未知）──
+        # INV-001：人工未计入时，利润是「按 0 计」的近似值，不是结论——
+        # 缺人工却显示「🟢 盈利」会让用户以为已经算清，补上人工后可能直接转亏。
+        _labor_uncounted = params.get("monthly_labor") is None
         if params["monthly_profit"] is None:
             profit_status = "⚪ 未知（需变动成本率）"
+        elif _labor_uncounted:
+            profit_status = "🟡 待定（人工未提供，按 0 计，补齐后可能转亏）"
         else:
             profit_status = "🟢 盈利" if params["monthly_profit"] > 0 else "🔴 亏损"
         rw_months = rw.get("runway_months")
@@ -1354,6 +1364,10 @@ def quick_scan(params_json: str) -> str:
             be_status = "🔴 未达保本" if _rev_check < rev_based_be else "🟢 可达保本"
         else:
             be_status = "⚪ 部分未知（客单价/客流/营收未给，保本判定不完整）"
+        # INV-001：人工未计入 → 固定成本偏低 → 保本客流门槛被系统性低估，
+        # 此时「🟢 可达保本」是假阳性（真实门槛更高），必须降级并点名。
+        if _labor_uncounted and be_status.startswith("🟢"):
+            be_status = "🟡 待定（人工未提供，保本门槛被低估）"
         # S3：gross_margin 内部为 0~1 口径，阈值由 50/30 相应改为 0.5/0.3
         if params.get("gross_margin") is None:
             margin_status = "⚪ 未知（需变动成本率）"

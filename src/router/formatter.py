@@ -161,7 +161,11 @@ def _fmt_scan(data: Dict) -> str:
     if monthly_profit is None:
         profit_status = "⚪ 未知（需变动成本率）"
     else:
-        profit_status = "🟢 盈利" if monthly_profit > 0 else "🔴 亏损"
+        # INV-001：徽章以引擎判定为唯一出处。此处原本另算一份，只看利润正负，
+        # 于是丢掉引擎「人工未提供」的降级，用户又看到确定的 🟢 盈利——
+        # 同一结论在两处各算一次，必然漂移，改为单源。
+        profit_status = status.get("profit") or (
+            "🟢 盈利" if monthly_profit > 0 else "🔴 亏损")
     lines.append(f"| 月利润 | {'—' if monthly_profit is None else f'{monthly_profit:,.0f} 元'} | {profit_status} |")
 
     monthly_revenue = core.get("monthly_revenue")
