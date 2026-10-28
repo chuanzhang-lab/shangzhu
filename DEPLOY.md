@@ -5,9 +5,19 @@
 
 ## 发布前必做：两道安全闸
 
-### 1. 移出密钥（必做，否则会连密钥一起上传）
-部署是**目录原样上传**，`.gitignore` 管不到它。`config/agent_llm_config.json`
-被 gitignore 覆盖，但 **`agent_llm_config.json.bak` 不在忽略列表里**——同样带密钥，最容易漏。
+### 1. 密钥：公开实例**有意保留**（2026-10-19 拍板，勿擅自撤）
+
+部署是**目录原样上传**，`.gitignore` 管不到它——所以带不带密钥由这一节决定，不由 gitignore 决定。
+
+**当前口径：保留。** 用户已明确选择让访客体验完整 AI 解读 + 追问回环，接受共享额度被消耗
+（无速率限制）。因此发布前**不要移出** `config/agent_llm_config.json`，发布后 `/health`
+报 `llm_configured: true` 是**预期结果，不是事故**。后续会话不得以"安全"为由自行改回无密钥档。
+
+密钥只存在于沙箱文件系统，HTTP 仅走应用路由，**不会下发到浏览器**；风险面是额度消耗，不是密钥外泄。
+两个密钥文件（`agent_llm_config.json` 与 `.bak`）现均被 `.gitignore` 覆盖（`*.bak*` 由 M-08 仓洁补上），
+不会入库，但**仍会随目录上传**——这与"保留"口径一致，无需处理。
+
+**备用规程（仅当用户明确要求撤密钥时才执行）**：
 
 ```bash
 mkdir -p ../_keys_shangzhu_zh
@@ -16,7 +26,6 @@ mv config/agent_llm_config.json config/agent_llm_config.json.bak ../_keys_shangz
 mv ../_keys_shangzhu_zh/agent_llm_config.json* config/
 ```
 
-漏做的后果：`/health` 会显示 `llm_configured: true`，任何人点「AI 解读」都在烧你的 key。
 **注意**：沙箱会复用同一实例，只删本地文件后重发**不够**（旧文件还在服务端），
 必须用「无密钥占位配置覆盖」再发一次，直到 `/health` 报 `llm_configured: false`。
 
@@ -75,9 +84,12 @@ curl --noproxy '*' "<链接>/health?detail=1"
 ```
 
 必须同时满足：
-- `llm_configured: false`（密钥没上去）
+- `llm_configured: true`（密钥有意上传，见第 1 节；若走了撤密钥的备用规程，则应为 `false`）
 - `store_backend: MemoryStore`（数据不落盘）
 - `version` 与本地 `pyproject.toml` 一致
+- `web_concurrency: 1`（memory 档下多 worker 会各自持一份内存，前端会看到会话漂移）
+- `static_ver` 与上次发布不同 —— 它是静态资源 mtime，**变了才说明新代码真的替换上去了**
+  （version 号可能没 bump，光看 version 会误判成"还是旧构建"）
 
 再跑一次真实对话（带 `X-Requested-With: XMLHttpRequest` 头，字段是 `messages`）：
 应返回中文结构化结果，且缺失字段标 `[缺失]` 而非当 0 硬算。
