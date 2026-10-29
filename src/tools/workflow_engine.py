@@ -395,9 +395,13 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
             p[fld] = _set(fld, raw, "[用户]")
 
     # ── 业务规则：劳动合理性门禁（>200 人 → 标矛盾，不参与计算）──
+    # INV-001 第二轮：判「值非空」而非「键存在」。先前用 `k in raw_params`，
+    # 于是键存在但值为 None 时照样算人工，`or 0` 把 None 吞成 0，
+    # 缺失被伪装成 [推算] 值（比 [缺失] 更危险：看起来有依据）。
     labor_present = all(
-        k in raw_params for k in ("employee_count", "avg_salary")
-    ) or ("staff_count" in raw_params and "avg_salary" in raw_params)
+        raw_params.get(k) is not None for k in ("employee_count", "avg_salary")
+    ) or (raw_params.get("staff_count") is not None
+          and raw_params.get("avg_salary") is not None)
     labor_burden = raw_params.get("labor_burden", 0.0)
     staff_n = float(p.get("employee_count") or 0)
     labor_blocked = False
@@ -481,10 +485,16 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         ("其他固定", p.get("other_fixed"), "[用户]" if p.get("other_fixed") is not None else None),
     ]
     present_specs = [(k, v, t) for k, v, t in component_specs if v is not None and t]
-    # 契约「按 0 计**并标注**」的另一半：人工未被计入固定成本时，必须在来源标注里
-    # 点名，否则用户读到的固定成本就是「租金」，却不知道人工被当成 0（INV-001）。
-    # 人工齐全（含用户显式给 0）时不加，避免把正常成分误报成缺失。
-    _labor_note = "（人工未提供，未计入）" if (not labor_present or labor_blocked) else ""
+    # 契约「按 0 计**并标注**」的另一半：必有固定成本项未计入时必须在来源标注里
+    # 点名。INV-001 第二轮把「人工」泛化为「租金 + 人工」——缺租金与缺人工同构
+    # （fixed/利润/保本同样按 0 计），首轮只修了人工。细项（水电/包装/提成/
+    # 其他固定）缺失是常态，不点名以免噪音；显式给 0 属已知值，也不点名。
+    _missing_req = []
+    if src.get("monthly_rent", "").startswith("[缺失]"):
+        _missing_req.append("租金")
+    if not labor_present or labor_blocked:
+        _missing_req.append("人工")
+    _req_note = f"（{'、'.join(_missing_req)}未提供，未计入）" if _missing_req else ""
     if present_specs:
         comp_sum = sum(v for _, v, _ in present_specs)
         comp_src = " + ".join(f"{k}{t}" for k, _, t in present_specs)
@@ -498,16 +508,16 @@ def _fill_params(raw_params: dict, _skip_guard: bool = False) -> tuple[dict, dic
         if explicit_total and explicit_total > 0:
             if abs(comp_sum - explicit_total) <= 1:
                 p["monthly_fixed_cost"] = comp_sum
-                src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src}){_labor_note}"
+                src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src}){_req_note}"
             else:
                 p["monthly_fixed_cost"] = comp_sum
                 src["monthly_fixed_cost"] = (
-                    f"{total_tag} 组件求和({comp_src}){_labor_note}，"
+                    f"{total_tag} 组件求和({comp_src}){_req_note}，"
                     f"与显式总数{explicit_total:g}矛盾→待澄清"
                 )
         else:
             p["monthly_fixed_cost"] = comp_sum
-            src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src}){_labor_note}"
+            src["monthly_fixed_cost"] = f"{total_tag} 组件求和({comp_src}){_req_note}"
     elif explicit_total and explicit_total > 0:
         p["monthly_fixed_cost"] = explicit_total
         src["monthly_fixed_cost"] = "[用户] 显式总数(组件未给出)"
@@ -718,6 +728,10 @@ def _check_sufficiency(params: dict, param_sources: dict) -> dict:
         gaps.append("月营收（或 日均客流 + 客单价）")
     if param_sources.get("total_investment", "").startswith("[缺失]"):
         gaps.append("总投资（算跑道/风险需要）")
+    # INV-001 第二轮：租金此前压根不在缺口清单里（只在 key_fields 参与 coverage），
+    # 缺租金连「还差什么」都不显示，比人工那个还隐蔽。
+    if param_sources.get("monthly_rent", "").startswith("[缺失]"):
+        gaps.append("月租金（固定成本主体，未提供则按 0 计）")
     if param_sources.get("employee_count", "").startswith("[缺失]"):
         gaps.append("人工成本（人数 + 薪资，未提供则按 0 计）")
     # D2：变动成本率缺失 → 无法算利润/平衡点 → 列入缺口，可算的部分照算
@@ -1327,13 +1341,20 @@ def quick_scan(params_json: str) -> str:
         narrative = _build_narrative(params, param_sources, scenarios, pit_total)
 
         # ── 状态标记（D2：变动成本率缺失时 profit/gross_margin 为 None → 状态=未知）──
-        # INV-001：人工未计入时，利润是「按 0 计」的近似值，不是结论——
-        # 缺人工却显示「🟢 盈利」会让用户以为已经算清，补上人工后可能直接转亏。
-        _labor_uncounted = params.get("monthly_labor") is None
+        # INV-001 第二轮：必有固定成本项（租金 / 人工）缺任一，利润就是「按 0 计」
+        # 的近似值而非结论——缺项却显示 🟢 盈利，会让用户以为已经算清，
+        # 补齐后可能直接转亏。用 param_sources 判缺失，不依赖数值（数值会被 or 0 吞）。
+        _missing_req = []
+        if param_sources.get("monthly_rent", "").startswith("[缺失]"):
+            _missing_req.append("租金")
+        if params.get("monthly_labor") is None or param_sources.get(
+                "monthly_labor", "").startswith("[缺失]"):
+            _missing_req.append("人工")
+        _req_txt = "、".join(_missing_req)
         if params["monthly_profit"] is None:
             profit_status = "⚪ 未知（需变动成本率）"
-        elif _labor_uncounted:
-            profit_status = "🟡 待定（人工未提供，按 0 计，补齐后可能转亏）"
+        elif _missing_req:
+            profit_status = f"🟡 待定（{_req_txt}未提供，按 0 计，补齐后可能转亏）"
         else:
             profit_status = "🟢 盈利" if params["monthly_profit"] > 0 else "🔴 亏损"
         rw_months = rw.get("runway_months")
@@ -1364,10 +1385,10 @@ def quick_scan(params_json: str) -> str:
             be_status = "🔴 未达保本" if _rev_check < rev_based_be else "🟢 可达保本"
         else:
             be_status = "⚪ 部分未知（客单价/客流/营收未给，保本判定不完整）"
-        # INV-001：人工未计入 → 固定成本偏低 → 保本客流门槛被系统性低估，
+        # INV-001 第二轮：必有项未计入 → 固定成本偏低 → 保本门槛被系统性低估，
         # 此时「🟢 可达保本」是假阳性（真实门槛更高），必须降级并点名。
-        if _labor_uncounted and be_status.startswith("🟢"):
-            be_status = "🟡 待定（人工未提供，保本门槛被低估）"
+        if _missing_req and be_status.startswith("🟢"):
+            be_status = f"🟡 待定（{_req_txt}未提供，保本门槛被低估）"
         # S3：gross_margin 内部为 0~1 口径，阈值由 50/30 相应改为 0.5/0.3
         if params.get("gross_margin") is None:
             margin_status = "⚪ 未知（需变动成本率）"

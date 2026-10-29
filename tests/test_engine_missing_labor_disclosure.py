@@ -65,6 +65,17 @@ _WITH_LABOR = dict(_NO_LABOR, employee_count=2, avg_salary=5000)
 # 判据必须是「缺失」语义（未提供 / 未计入 / 按 0 计）。
 _CAVEAT = "未提供"
 
+# 租金是固定成本的另一主体：缺租金与缺人工完全同构（利润/保本同样被按 0 计），
+# 但 INV-001 首轮只修了人工，租金这一侧完全没标注，连 gaps 清单里都没有它。
+_NO_RENT = {"industry": "餐饮", "daily_traffic": 80, "price_per_unit": 25,
+            "variable_cost_ratio": 0.35, "employee_count": 2, "avg_salary": 5000}
+
+# 键存在但值为 None：workflow_engine 用「键存在」判 labor_present，
+# 于是 None 被 `or 0` 吞成 0，人工被伪装成 [推算] 值而非 [缺失]。
+_NONE_LABOR_KEY = {"industry": "餐饮", "daily_traffic": 80, "price_per_unit": 25,
+                   "variable_cost_ratio": 0.35, "monthly_rent": 8000,
+                   "employee_count": None, "avg_salary": 5000}
+
 
 # ── 缺陷侧：人工缺失时不得给出「确定」判定 ────────────────────────────────
 
@@ -130,3 +141,71 @@ def test_labor_present_metrics_unchanged():
     assert 36 <= m["daily_breakeven"] <= 38, m
     assert r["status"]["breakeven"].startswith("🟢"), r["status"]
     assert _CAVEAT not in r["param_sources"]["monthly_fixed_cost"]
+
+
+# ── 缺陷侧（第二轮）：租金缺失 —— INV-001 的同构实例 ──────────────────────
+
+def test_rent_missing_profit_status_not_confident():
+    """缺租金时，利润状态不得是确定的 🟢 盈利 / 🔴 亏损，且必须点名租金。"""
+    status = _scan(_NO_RENT)["status"]["profit"]
+    assert not status.startswith("🟢"), f"缺租金却给出确定盈利判定：{status}"
+    assert not status.startswith("🔴"), f"缺租金却给出确定亏损判定：{status}"
+    assert "租金" in status, f"状态未点名租金缺失：{status}"
+
+
+def test_rent_missing_fixed_cost_src_annotates():
+    """缺租金时，固定成本来源标注必须说明租金未计入（不能只写「组件求和(人工)」）。"""
+    src = _scan(_NO_RENT)["param_sources"]["monthly_fixed_cost"]
+    assert "租金" in src and _CAVEAT in src, f"固定成本来源未标注租金缺失：{src}"
+
+
+def test_rent_missing_breakeven_flagged():
+    """缺租金时，保本判定不得是确定的 🟢 可达保本（固定成本少了租金）。"""
+    be = _scan(_NO_RENT)["status"]["breakeven"]
+    assert not be.startswith("🟢"), f"缺租金却给出确定保本判定：{be}"
+    assert "租金" in be, f"保本判定未点名租金缺失：{be}"
+
+
+def test_rent_missing_shows_up_in_gaps():
+    """缺租金必须出现在「还差这些参数」清单里——门禁拦下时用户看得见的那份。
+
+    注意面选错会假红：gaps 只在 insufficient 路径被渲染，引擎放行（营收已知）时
+    quick_scan 输出里根本没有 gaps 键。所以断言必须落在渲染结果上，不能读内部
+    结构。这里让营收也缺失，走门禁拦下路径。
+    """
+    md = _render({"industry": "餐饮", "employee_count": 2, "avg_salary": 5000,
+                  "variable_cost_ratio": 0.35})
+    assert "还差这些参数" in md, md[:300]
+    seg = md.split("还差这些参数", 1)[1].split("##")[0]
+    assert "租金" in seg, f"缺口清单里没有租金：{seg[:300]}"
+
+
+# ── 缺陷侧（第二轮）：None 值不得被 `or 0` 吞成 0 ─────────────────────────
+
+def test_none_valued_employee_count_not_swallowed_to_zero():
+    """employee_count 为 None 时，人工必须是「缺失」，不得被 `or 0` 变成 0 还标 [推算]。
+
+    标 [推算] 比标 [缺失] 更危险：它看起来是个有依据的数，实际是缺失伪装的。
+    """
+    r = _scan(_NONE_LABOR_KEY)
+    labor = r["params"].get("monthly_labor")
+    src = r["param_sources"].get("monthly_labor", "")
+    assert labor is None, f"缺失被吞成数值：monthly_labor={labor}"
+    assert src.startswith("[缺失]"), f"缺失被伪装成可信值：{src}"
+
+
+def test_none_valued_employee_count_profit_not_confident():
+    """承上：人工被吞成 0 时，利润徽章不得仍是确定的 🟢 盈利。"""
+    status = _scan(_NONE_LABOR_KEY)["status"]["profit"]
+    assert not status.startswith("🟢"), f"人工缺失却给出确定盈利判定：{status}"
+    assert "人工" in status, f"状态未点名人工缺失：{status}"
+
+
+# ── 防误伤侧（第二轮）：显式给 0 不等于缺失 ───────────────────────────────
+
+def test_explicit_zero_rent_not_flagged_as_missing():
+    """用户明说「租金 0」（在家办公）时，不得报租金缺失——0 是已知值不是未知。"""
+    r = _scan(dict(_NO_RENT, monthly_rent=0))
+    src = r["param_sources"]["monthly_fixed_cost"]
+    assert "租金" not in src or _CAVEAT not in src, f"显式 0 被误报成缺失：{src}"
+    assert r["status"]["profit"].startswith("🟢"), r["status"]
