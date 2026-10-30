@@ -35,23 +35,22 @@ def parse_project_params(text: str) -> dict:
 
     委托 router.param_extractor.extract_params（唯一真相源）完成解析，
     并将输出字段映射到本项目历史 schema，保持对 B 路径 agent 的兼容：
-    - founder_count 来自 employee_count（历史用「合伙人/创始人」计数，默认 1）
+    - founder_count 直取抽取器的真实口径（创始人 ≠ 员工），缺失时不补、不猜
     - city 由轻量正则补充（引擎层 extract_params 不覆盖该私有字段）
+
+    注意：历史上此处曾用 employee_count 反填 founder_count，与抽取层
+    「创始人 ≠ 员工」的分流语义冲突，已于 2026-10-31 移除（见 docs/invariants.md
+    INV-003）。缺创始人信息时该字段不出现在结果里，由下游自选默认，
+    不在本层凭员工数臆造。
     """
     raw = _extract_params(text)
     params: dict = {}
 
-    # 直接对齐的字段
+    # 直接对齐的字段（含 founder_count：与抽取层同源同义，不再跨字段派生）
     for f in ("industry", "total_investment", "monthly_rent",
-              "daily_traffic", "price_per_unit"):
+              "daily_traffic", "price_per_unit", "founder_count"):
         if f in raw and raw[f] is not None:
             params[f] = raw[f]
-
-    # founder_count：历史用「合伙人/创始人」计数，默认 1
-    if raw.get("employee_count") is not None:
-        params["founder_count"] = int(raw["employee_count"])
-    else:
-        params["founder_count"] = 1
 
     # city：引擎层 extract_params 未覆盖，保留原有轻量正则
     city_match = re.search(r'在(\w+(?:市|区|县))', text)

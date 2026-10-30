@@ -20,7 +20,9 @@ def test_cleanup_project_manager_single_parser():
     断言：
     1) 冗余解析器 _parse_amount / _parse_int / _infer_industry 已从源码删除；
     2) parse_project_params 行为正确（委托 param_extractor）：
-       餐饮识别、金额/租金换算、员工数→founder_count 映射。
+       餐饮识别、金额/租金换算；
+    3) founder_count 直取抽取器真实口径，不得由 employee_count 反填
+       （创始人 ≠ 员工，见 docs/invariants.md INV-003）。
     """
     src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -39,12 +41,22 @@ defs = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 for dup in ('_parse_amount', '_parse_int', '_infer_industry'):
     assert dup not in defs, '冗余解析器 %s 未删除（应复用 param_extractor）' % dup
 # 2) 行为正确（委托 param_extractor）
-r = pm.parse_project_params('开奶茶店投资50万月租2万员工3人工资各5000客单价15')
+r = pm.parse_project_params('开奶茶店投资50万月租2万创始人3人客单价15')
 assert r.get('industry') == '餐饮', r
 assert r.get('total_investment') == 500000.0, r
 assert r.get('monthly_rent') == 20000.0, r
 assert r.get('price_per_unit') == 15.0, r
-assert r.get('founder_count') == 3, r
+assert r.get('founder_count') == 3.0, r
+# 3) 创始人 ≠ 员工：员工数不得反填 founder_count，也不得凭空补默认值
+EMP_TEXT = '开奶茶店投资50万月租2万员工3人工资各5000客单价15'
+from router.param_extractor import extract_params as _rx
+_raw = _rx(EMP_TEXT)
+assert _raw.get('employee_count') == 3.0, f'抽取层未识别员工数: {_raw}'
+r2 = pm.parse_project_params(EMP_TEXT)
+assert 'founder_count' not in r2, f'员工数被反填为 founder_count: {r2}'
+# 缺创始人信息时字段缺席（宁缺勿填），不得臆造默认 1
+r3 = pm.parse_project_params('开奶茶店投资50万月租2万客单价15')
+assert 'founder_count' not in r3, f'缺失却被补默认值: {r3}'
 print('CLEANUP_OK')
 '''
     code = code.replace("__SRC__", src)
